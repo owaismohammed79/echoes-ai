@@ -13,8 +13,8 @@
  * never take the walk down with it.
  */
 
-const WALK_TITLE = "Echoes Walking Guide";
-const WALK_ARTIST = "Echoes";
+const WALK_TITLE = "Echoes Walk";
+const WALK_ARTIST = "Gemma Historian";
 
 export interface WalkSessionHandlers {
   onPlay: () => void;

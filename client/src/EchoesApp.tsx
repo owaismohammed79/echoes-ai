@@ -3,6 +3,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { AmbientState } from "@/components/echoes/ambient-state";
 import { ConversationalOrb } from "@/components/echoes/conversational-orb";
 import { PermissionsScreen } from "@/components/echoes/permissions-screen";
+import { LlmOutageModal } from "@/components/echoes/llm-outage-modal";
+import { PocketModeOverlay } from "@/components/echoes/pocket-mode";
 import { ScreenLockGuard } from "@/components/echoes/ScreenLockGuard";
 import { SimulationStrip } from "@/components/echoes/simulation-strip";
 import { SourceDrawer } from "@/components/echoes/source-drawer";
@@ -18,6 +20,7 @@ import { TextGenerateEffect } from "@/components/ui/text-generate-effect";
 import { useWalkController } from "@/hooks/use-walk-controller";
 import { type Activity, type WalkEngine } from "@/lib/demo-engine";
 import { realEngine } from "@/lib/real-engine";
+import { useScreenWakeLock } from "@/lib/wake-lock";
 import { cn } from "@/lib/utils";
 import { classifyVoiceFailure } from "@/lib/voice-status";
 
@@ -42,6 +45,18 @@ export default function EchoesApp({ engine = realEngine }: { engine?: WalkEngine
   // The guard watches the screen only while a walk is actually running: once the
   // walk completes the screen-on clock stops and the summary takes over.
   const guardActive = live && !walk.completed;
+
+  // Pocket Mode: the ultra-dark overlay for a walk being listened to with the
+  // phone away. Kept here so it can be dismissed by the walk ending, and so the
+  // wake lock keeps the tab alive underneath it.
+  const [pocket, setPocket] = useState(false);
+  useEffect(() => {
+    if (!live) setPocket(false);
+  }, [live]);
+
+  // Hold the screen awake for the length of the walk, re-acquiring it whenever
+  // the page comes back to the foreground.
+  useScreenWakeLock(guardActive);
 
   // The permissions screen is the app's front door: the walker always lands
   // here first and the walk only initialises once they submit their mood,
@@ -220,6 +235,15 @@ export default function EchoesApp({ engine = realEngine }: { engine?: WalkEngine
               {walk.mic && <TechLabel tone="accent">{walk.mic}</TechLabel>}
               {walk.notice && <TechLabel tone="accent">{walk.notice}</TechLabel>}
               {voice.badge && <TechLabel tone="accent">{voice.badge}</TechLabel>}
+              {live && !walk.completed && (
+                <button
+                  type="button"
+                  onClick={() => setPocket(true)}
+                  className="font-mono text-[10px] tracking-[0.064em] text-white/45 uppercase transition-colors hover:text-white/80"
+                >
+                  pocket mode
+                </button>
+              )}
               {live && (
                 <button
                   type="button"
@@ -333,6 +357,23 @@ export default function EchoesApp({ engine = realEngine }: { engine?: WalkEngine
           data={summary}
           onStartNew={handleStartNew}
           onClose={handleStartNew}
+        />
+      )}
+
+      {/* Pocket Mode sits above the live UI, below nothing: while it is up the
+          only input is the two-tap unlock. */}
+      <PocketModeOverlay
+        open={live && pocket}
+        onClose={() => setPocket(false)}
+      />
+
+      {/* The narration cascade is down: nothing was said, so offer a Retry
+          rather than a broken walk. */}
+      {walk.outage && (
+        <LlmOutageModal
+          message={walk.outage}
+          onRetry={walk.retryOutage}
+          onDismiss={walk.dismissOutage}
         />
       )}
     </div>

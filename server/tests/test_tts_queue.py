@@ -256,6 +256,60 @@ def test_breaker_resets_after_a_success() -> None:
     assert not breaker.is_open()
 
 
+def test_a_success_after_failures_restores_the_real_voice() -> None:
+    """A transient hiccup must not pin the walk to native TTS.
+
+    Two failures below the threshold, then a 200 with audio bytes: the breaker's
+    count goes back to zero and the next sentence is served by ElevenLabs again,
+    so ``outcome.ok`` -- the server's ``use_native_tts: false`` -- is restored
+    rather than staying latched on.
+    """
+
+    class FlakyTTS(StubTTS):
+        def __init__(self, *, failures: int) -> None:
+            super().__init__()
+            self._left = failures
+
+        async def stream_audio(self, text: str):
+            if self._left > 0:
+                self._left -= 1
+                raise TTSRateLimited("429")
+            async for chunk in super().stream_audio(text):
+                yield chunk
+
+    breaker = CircuitBreaker(failure_threshold=3)
+    queue = TTSQueue(FlakyTTS(failures=2), breaker=breaker)
+
+    assert run(queue.synthesize("a")).ok is False
+    assert run(queue.synthesize("b")).ok is False
+
+    good = run(queue.synthesize("c"))
+    assert good.ok is True
+    assert good.audio == FAKE_AUDIO
+    # The error count is cleared by the successful response, not left standing.
+    assert breaker.failures == 0
+    assert not breaker.is_open()
+
+
+def test_a_successful_probe_after_the_cool_down_closes_the_breaker() -> None:
+    """Half-open must not leave the breaker one failure from re-opening."""
+    now = [0.0]
+    breaker = CircuitBreaker(failure_threshold=1, reset_after=60.0, clock=lambda: now[0])
+    queue = TTSQueue(StubTTS(), breaker=breaker)
+
+    breaker.record_failure()
+    assert run(queue.synthesize("blocked")).reason == "circuit_open"
+
+    now[0] = 61.0
+    assert run(queue.synthesize("probe")).ok
+    assert breaker.failures == 0
+    assert not breaker.is_open()
+
+    # Still closed for the sentence after the probe.
+    now[0] = 62.0
+    assert run(queue.synthesize("after")).ok
+
+
 def test_stream_sentence_concatenates_first_chunk_then_the_rest() -> None:
     async def scenario() -> tuple[str, bytes]:
         # Everything in one loop: the returned generator belongs to the loop

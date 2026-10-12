@@ -60,11 +60,23 @@ class CircuitBreaker:
         if self._opened_at is None:
             return False
         if self._clock() - self._opened_at >= self._reset_after:
-            # Cool-down elapsed: allow a single probe through.
+            # Cool-down elapsed: half-open. One probe is allowed through, and the
+            # stale open timestamp is dropped here so a *successful* probe leaves
+            # the breaker fully closed rather than one failure away from
+            # re-opening on the same trip.
+            self._opened_at = None
             return False
         return True
 
     def record_success(self) -> None:
+        """Close the breaker on any usable provider response.
+
+        A 200 with valid audio bytes is proof ElevenLabs is healthy again, so
+        both the consecutive-failure count and the open timestamp are cleared.
+        Without the count reset a single transient hiccup would keep the breaker
+        re-arming on the next blip, and the walk would stay pinned to native TTS
+        instead of returning to the real voice.
+        """
         self._failures = 0
         self._opened_at = None
 

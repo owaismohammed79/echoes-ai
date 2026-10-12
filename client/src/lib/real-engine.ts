@@ -49,6 +49,40 @@ function api(path: string): string {
   return `${API_BASE}${path}`;
 }
 
+/**
+ * The narration cascade ran out of providers inside its retry budget.
+ *
+ * `/api/walk` answers a spent cascade with HTTP 503 and a structured body
+ * (`{ status: "error", code: "LLM_TEMPORARY_OUTAGE", message }`). That is not a
+ * broken walk -- nothing has been streamed -- so the controller catches this
+ * one specifically and offers a Retry rather than reporting a generic failure.
+ */
+export class LlmTemporaryOutageError extends Error {
+  readonly code = "LLM_TEMPORARY_OUTAGE";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "LlmTemporaryOutageError";
+  }
+}
+
+const OUTAGE_MESSAGE =
+  "Gemma is experiencing high global traffic. Please try again shortly.";
+
+/** Read a 503's structured body, falling back to the canned message. */
+async function readOutage(res: Response): Promise<LlmTemporaryOutageError> {
+  let message = OUTAGE_MESSAGE;
+  try {
+    const body = (await res.json()) as { code?: unknown; message?: unknown };
+    if (typeof body?.message === "string" && body.message) {
+      message = body.message;
+    }
+  } catch {
+    // A proxy's HTML 503 carries no JSON body; the status still means outage.
+  }
+  return new LlmTemporaryOutageError(message);
+}
+
 /** A session id the client owns, so audio tokens and PTT answers bind to this walk. */
 function newSessionId(): string {
   const c = globalThis.crypto;
@@ -351,6 +385,9 @@ function createRealEngine(): WalkEngine {
           mood: prefs?.mood,
         }),
       });
+      // The cascade is down: a 503 with a structured body, before any frame has
+      // been sent. Surfaced as its own error so the walk offers a Retry.
+      if (res.status === 503) throw await readOutage(res);
       if (!res.ok || !res.body) throw new Error(`walk_failed_${res.status}`);
 
       const context = await contextPromise;

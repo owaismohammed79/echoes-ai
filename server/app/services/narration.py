@@ -6,7 +6,11 @@ The load-bearing guarantee: **no unvalidated sentence ever reaches TTS.** If the
 model produces nothing usable -- whether because every sentence failed citation
 validation or because the provider threw -- this module degrades to NOTICE mode,
 and if that fails too it returns pre-approved static copy. It never raises to
-the caller and never speaks raw model output.
+the caller and never speaks raw model output, with a single deliberate
+exception: :class:`LLMTemporaryOutage`, which means the whole provider cascade
+is down rather than one sentence being bad, and must reach the API so it can
+answer with the structured retryable error instead of pretending static copy is
+the walk.
 
 Two deliberate exemptions sit alongside that guarantee, and both are bounded:
 sentences injected in code (the greeting and the hand-off, which carry no
@@ -34,7 +38,7 @@ from app.services.prompts import (
     build_notice_user_prompt,
     build_story_user_prompt,
 )
-from app.services.providers import LLMProvider
+from app.services.providers import LLMProvider, LLMTemporaryOutage
 from app.validation import (
     RejectionReason,
     SentenceAssembler,
@@ -121,6 +125,12 @@ async def _stream_and_validate(
     retry inline (docs/llm-orchestration.md 7.8). The failure is captured in
     ``error`` and logged so it stays observable.
 
+    The one exception is :class:`LLMTemporaryOutage`: that is not a stream that
+    failed, it is the whole cascade failing inside its retry budget, and
+    degrading to static copy would hide a systemic outage from the walker. It is
+    re-raised so the API can answer with the structured retryable error
+    (``LLM_TEMPORARY_OUTAGE``).
+
     A sentence the chunk already contains is dropped as a duplicate. Repeating a
     sentence is the failure mode a walker notices immediately and the one the
     cap cannot catch: it costs nothing to say, and it arrives as a full-length
@@ -159,6 +169,10 @@ async def _stream_and_validate(
                 handle(sentence)
         for sentence in assembler.flush():
             handle(sentence)
+    except LLMTemporaryOutage:
+        # Every provider is down: this is an outage, not a bad sentence. Let it
+        # reach the API layer, which knows how to say so to the client.
+        raise
     except Exception as exc:  # noqa: BLE001 - designed degradation, see docstring
         error = f"{type(exc).__name__}: {exc}"
         logger.warning("narration stream failed: %s", error)
@@ -182,9 +196,11 @@ async def generate_narration(
 ) -> NarrationResult:
     """Produce validated narration for one walk step.
 
-    Never raises. Degradation to NOTICE happens at most once, so a prompt or
-    model change that makes the validator reject everything cannot become an
-    unbounded loop.
+    Never raises, except for :class:`LLMTemporaryOutage`: a stream that fails
+    degrades, but a cascade that has exhausted every provider is a systemic
+    outage the caller is told about. Degradation to NOTICE happens at most once,
+    so a prompt or model change that makes the validator reject everything
+    cannot become an unbounded loop.
 
     ``greeting`` and ``handoff`` are injected in code, after validation: both
     are citation-free, so a model that produced them would have them deleted

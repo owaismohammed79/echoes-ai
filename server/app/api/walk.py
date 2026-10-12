@@ -21,8 +21,8 @@ from dataclasses import replace
 from datetime import datetime
 from typing import Any, AsyncIterator
 
-from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.api.limits import (
     AdmittedWalk,
@@ -42,7 +42,7 @@ from app.services.prompts import (
     NoticeContext,
     build_greeting,
 )
-from app.services.providers import NullLLMProvider
+from app.services.providers import LLMTemporaryOutage, NullLLMProvider
 from app.services.weather import hour_from_clock
 
 logger = logging.getLogger("echoes.api.walk")
@@ -114,7 +114,7 @@ async def api_walk(
     request: Request,
     container: ContainerDep,
     admitted: AdmittedWalkDep,
-) -> StreamingResponse:
+) -> Response:
     """Aggregate context, narrate, synthesize, and stream NDJSON frames."""
     lat = round(payload.lat, 3)
     lon = round(payload.lon, 3)
@@ -160,21 +160,39 @@ async def api_walk(
         session_id=payload.session_id,
     )
 
-    narration = await generate_narration(
-        mode=context.mode,
-        provider=container.llm or NullLLMProvider(),
-        facts=context.facts,
-        greeting=_greeting_for(context.weather),
-        # The hand-off belongs to a story block: Notice Mode has no story to
-        # leave, so it is only appended when the walk is narrating facts.
-        handoff=WALK_HANDOFF if context.mode == "STORY" else None,
-        mood=payload.mood,
-        weather=context.weather,
-        # Headlines the narrator may allude to once (never state). Empty when no
-        # news provider answered, in which case the prompt has no news block at
-        # all and the model is told to ignore the section.
-        news=context.news,
-    )
+    try:
+        narration = await generate_narration(
+            mode=context.mode,
+            provider=container.llm or NullLLMProvider(),
+            facts=context.facts,
+            greeting=_greeting_for(context.weather),
+            # The hand-off belongs to a story block: Notice Mode has no story to
+            # leave, so it is only appended when the walk is narrating facts.
+            handoff=WALK_HANDOFF if context.mode == "STORY" else None,
+            mood=payload.mood,
+            weather=context.weather,
+            # Headlines the narrator may allude to once (never state). Empty when
+            # no news provider answered, in which case the prompt has no news
+            # block at all and the model is told to ignore the section.
+            news=context.news,
+        )
+    except LLMTemporaryOutage as exc:
+        # Every provider in the cascade failed inside its retry budget. This is
+        # the one narration failure the walker is told about rather than being
+        # silently degraded to static copy: the structured error is a signal to
+        # tap Retry, not a broken walk. Nothing has been streamed yet, so the
+        # status can still be a 503 with a JSON body.
+        logger.warning("narration cascade exhausted: %s", exc.detail or exc)
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "error",
+                "code": exc.code,
+                "message": exc.message,
+            },
+            headers={**quota, **demo_headers(False)},
+        )
+
     # The validated narration the walk will speak, kept on the session so a
     # follow-up question can resolve what it refers back to.
     session.narration_text = narration.spoken_text

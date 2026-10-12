@@ -23,6 +23,7 @@ import {
   publishWalkSession,
   setWalkSessionState,
 } from "@/lib/media-session";
+import { LlmTemporaryOutageError } from "@/lib/real-engine";
 import { useContinuousVad } from "@/hooks/use-continuous-vad";
 import { getAudioContext } from "@/lib/audio-context";
 
@@ -37,6 +38,15 @@ export interface WalkController {
   muted: boolean;
   /** Why the last question could not be answered, when it could not. */
   notice: string | null;
+  /**
+   * The narration cascade is down (`LLM_TEMPORARY_OUTAGE`). Holds the server's
+   * own message; null when nothing is wrong. Drives the retry modal.
+   */
+  outage: string | null;
+  /** Try the walk again, with the preferences it failed on. */
+  retryOutage: () => void;
+  /** Close the outage modal without retrying. */
+  dismissOutage: () => void;
   mode: Mode;
   facts: Fact[];
   segments: Segment[];
@@ -124,6 +134,7 @@ export function useWalkController(engine: WalkEngine): WalkController {
   const [activity, setActivity] = useState<Activity>("ready");
   const [muted, setMuted] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [outage, setOutage] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>("STORY");
   const [facts, setFacts] = useState<Fact[]>([]);
   const [segments, setSegments] = useState<Segment[]>([]);
@@ -158,6 +169,8 @@ export function useWalkController(engine: WalkEngine): WalkController {
   const indexRef = useRef(0);
   const segmentsRef = useRef<Segment[]>([]);
   const pausedRef = useRef(false);
+  /** The preferences the last walk attempt used, so a Retry repeats the walk. */
+  const lastPrefsRef = useRef<WalkPrefs | undefined>(undefined);
   // StrictMode mounts twice; the flag must be reset on mount, not only cleared.
   const mounted = useRef(true);
 
@@ -832,6 +845,7 @@ export function useWalkController(engine: WalkEngine): WalkController {
     // Every walk gets its own run id, so a clip fetched for the last one cannot
     // speak into this one.
     runIdRef.current += 1;
+    lastPrefsRef.current = prefs;
     setPhase("arming");
     setDrawer(false);
     setScreenOnSeconds(0);
@@ -839,6 +853,7 @@ export function useWalkController(engine: WalkEngine): WalkController {
     setCompleted(false);
     setFallback(null);
     setNotice(null);
+    setOutage(null);
 
     void (async () => {
       // The device fix and the server-side locate are alternatives, not a race.
@@ -905,22 +920,34 @@ export function useWalkController(engine: WalkEngine): WalkController {
         playFrom(0, path);
       };
 
-      const narration = await engine.narrate({
-        mode,
-        fix: located,
-        prefs,
-        onPartial: (partial) => {
-          if (!mounted.current || live) return;
-          // A walk the backend cannot speak remotely starts on the browser voice
-          // rather than fetching audio that will not come and calling it a
-          // failure. This is the normal local mode (ECHOES_FORCE_NATIVE_TTS).
-          const path: VoicePath =
-            partial.remoteAudio === false ? "native" : voicePath;
-          if (path !== voicePath) setVoicePath(path);
-          goLive(partial.facts, partial.segments, partial.mode, path);
-        },
-      });
-      if (!mounted.current) return;
+      const narration = await engine
+        .narrate({
+          mode,
+          fix: located,
+          prefs,
+          onPartial: (partial) => {
+            if (!mounted.current || live) return;
+            // A walk the backend cannot speak remotely starts on the browser voice
+            // rather than fetching audio that will not come and calling it a
+            // failure. This is the normal local mode (ECHOES_FORCE_NATIVE_TTS).
+            const path: VoicePath =
+              partial.remoteAudio === false ? "native" : voicePath;
+            if (path !== voicePath) setVoicePath(path);
+            goLive(partial.facts, partial.segments, partial.mode, path);
+          },
+        })
+        .catch((err: unknown) => {
+          if (!mounted.current) return null;
+          if (err instanceof LlmTemporaryOutageError) {
+            // The cascade spent its budget before streaming a frame: nothing was
+            // said, so this is a pause, not a failure. The modal offers Retry.
+            setOutage(err.message);
+            setPhase("idle");
+            return null;
+          }
+          throw err;
+        });
+      if (!mounted.current || narration === null) return;
 
       setTimings(narration.timings);
       setMode(narration.mode);
@@ -950,6 +977,15 @@ export function useWalkController(engine: WalkEngine): WalkController {
       );
     })();
   }, [engine, fillQueue, mode, playFrom, requestFix, voicePath]);
+
+  /** Close the outage modal; the walker chose not to retry. */
+  const dismissOutage = useCallback(() => setOutage(null), []);
+
+  /** Retry the walk that the outage interrupted, with the same preferences. */
+  const retryOutage = useCallback(() => {
+    setOutage(null);
+    start(lastPrefsRef.current);
+  }, [start]);
 
   /**
    * Registered once with the Media Session, dispatched every time. A lock-screen
@@ -1070,6 +1106,7 @@ export function useWalkController(engine: WalkEngine): WalkController {
       levelRef: vad.levelRef,
       muted,
       notice,
+      outage,
       drawer,
       voicePath,
       setDrawer,
@@ -1077,6 +1114,8 @@ export function useWalkController(engine: WalkEngine): WalkController {
       setMode,
       setScreenOnSeconds,
       start,
+      retryOutage,
+      dismissOutage,
       togglePause,
       toggleMute,
       endWalk,
@@ -1097,10 +1136,13 @@ export function useWalkController(engine: WalkEngine): WalkController {
       mode,
       muted,
       notice,
+      outage,
       phase,
       refused,
       segments,
       start,
+      retryOutage,
+      dismissOutage,
       timings,
       toggleMute,
       togglePause,
