@@ -1,3 +1,18 @@
+# Local tooling state (project-specific agents/CLIs)
 .backboard
 .freebuff
-*.env
+
+# Secrets. `.env.example` is the one that belongs in the repository: it documents
+# the keys without carrying them (AGENTS.md 5).
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Node / Vite
+node_modules/
+dist/

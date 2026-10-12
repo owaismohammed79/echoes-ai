@@ -10,12 +10,12 @@ the caller and never speaks raw model output.
 
 Two deliberate exemptions sit alongside that guarantee, and both are bounded:
 sentences injected in code (the greeting and the hand-off, which carry no
-citation the validator could check), up to ``MAX_UNCITED_FRAMING_SENTENCES``
-framing sentences per chunk, which the validator admits only when they cannot be
-read as a claim about anything in particular
-(``validation.rules._is_framing_sentence``), and up to ``MAX_NEWS_REFERENCES``
-sentences the model marked as resting on the RECENT LOCAL NEWS block, which
-spend the framing allowance as well.
+citation the validator could check), and up to ``MAX_UNCITED_FRAMING_SENTENCES``
+uncited sentences per chunk -- admitted either as framing, which the validator
+allows only when the sentence cannot be read as a claim about anything in
+particular (``validation.rules._is_framing_sentence``), or as a marked
+reference to the RECENT LOCAL NEWS block, of which the chunk may have at most
+``MAX_NEWS_REFERENCES`` and which spends one of those framing slots.
 """
 
 from __future__ import annotations

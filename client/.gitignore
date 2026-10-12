@@ -1,3 +1,18 @@
+# The frontend's dependencies and build output. `dist/` is rebuilt by the deploy
+# (`npm ci && npm run build`, render.yaml) and by Vercel, so a committed copy is
+# a stale copy.
 node_modules/
 dist/
+
+# Local overrides, e.g. `.env.local` pointing Vite at a non-default API.
 *.local
+
+# Secrets and per-environment configuration. `VITE_API_BASE_URL` is set in the
+# host's dashboard instead; `.env.example` is the committed contract.
+.env
+.env.*
+!.env.example
+
+# No Python here, but a stray interpreter cache is the fastest way to make a
+# repository look dirty.
+__pycache__/

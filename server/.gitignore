@@ -1,0 +1,17 @@
+# The backend's own secrets. `Render` supplies these as dashboard environment
+# variables (render.yaml, `sync: false`), so this file must never be committed;
+# `.env.example` is the committed contract.
+.env
+.env.*
+!.env.example
+
+# Python build/run artefacts. `__pycache__` is the one that matters: bytecode
+# compiled on one machine is committed by accident more often than anything else.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.venv/
+venv/
