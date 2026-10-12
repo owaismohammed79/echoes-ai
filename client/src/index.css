@@ -1,0 +1,199 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* ---------------------------------------------------------------------------
+ * Echoes palette. Two colours only: base #09090B and accent #10B981, on
+ * surface #18181B. Everything else is a neutral step off the base.
+ *
+ * The registry components (magicui, aceternity, shadcn) are written against
+ * shadcn's semantic tokens rather than raw hex, so redefining those tokens here
+ * is what lands upstream source on this palette without rewriting its markup.
+ * A component that asks for `--foreground` gets our ink; one that asks for
+ * `--primary` gets the accent.
+ * ------------------------------------------------------------------------- */
+
+@theme inline {
+  --color-base: #09090b;
+  --color-surface: #18181b;
+  --color-accent: #10b981;
+
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+    Roboto, sans-serif;
+  --font-serif: "Playfair Display", ui-serif, Georgia, "Times New Roman", serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas,
+    monospace;
+
+  /* The system's only geometry: a 1px radius and 1px hairlines. */
+  --radius-sm: 1px;
+  --radius-md: 1px;
+  --radius-lg: 1px;
+  --radius-xl: 1px;
+  --radius-2xl: 1px;
+  --radius-3xl: 1px;
+
+  /* Type scale. Hierarchy comes from size and tracking, never weight. */
+  --text-micro: 10px;
+  --text-micro--line-height: 1.6;
+  --text-micro--letter-spacing: 0.064em;
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --animate-ripple: ripple var(--duration,2s) ease calc(var(--i, 0)*.2s) infinite;
+  --animate-shimmer-slide: shimmer-slide var(--speed) ease-in-out infinite alternate;
+  --animate-spin-around: spin-around calc(var(--speed) * 2) infinite linear;
+  @keyframes ripple {
+  0%, 100% {
+    transform: translate(-50%, -50%) scale(1);
+    }
+  50% {
+    transform: translate(-50%, -50%) scale(0.9);
+    }
+  }
+  @keyframes shimmer-slide {
+  to {
+    transform: translate(calc(100cqw - 100%), 0);
+    }
+  }
+  @keyframes spin-around {
+  0% {
+    transform: translateZ(0) rotate(0);
+    }
+  15%, 35% {
+    transform: translateZ(0) rotate(90deg);
+    }
+  65%, 85% {
+    transform: translateZ(0) rotate(270deg);
+    }
+  100% {
+    transform: translateZ(0) rotate(360deg);
+    }
+  }
+  --animate-shiny-text: shiny-text 8s infinite
+;
+  @keyframes shiny-text {
+  0%, 90%, 100% {
+    background-position: calc(-100% - var(--shiny-width)) 0;}
+  30%, 60% {
+    background-position: calc(100% + var(--shiny-width)) 0;}}}
+
+:root {
+  --background: #09090b;
+  --foreground: #fafafa;
+
+  --card: #18181b;
+  --card-foreground: #fafafa;
+  --popover: #18181b;
+  --popover-foreground: #fafafa;
+
+  /* The single chromatic fill in the interface. */
+  --primary: #10b981;
+  --primary-foreground: #09090b;
+
+  --secondary: #18181b;
+  --secondary-foreground: #fafafa;
+  --muted: #18181b;
+  --muted-foreground: rgba(250, 250, 250, 0.55);
+  --accent: #10b981;
+  --accent-foreground: #09090b;
+  --destructive: #10b981;
+
+  --border: rgba(250, 250, 250, 0.1);
+  --input: rgba(250, 250, 250, 0.16);
+  --ring: #10b981;
+
+  color-scheme: dark;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    /* A walking screen is held one-handed; never let a tap highlight or a
+       rubber-band scroll compete with the audio state. */
+    -webkit-tap-highlight-color: transparent;
+    overscroll-behavior: none;
+  }
+  /* Nothing in this interface is decorative, so nothing is focusable-looking
+     by accident. The ring is the only focus affordance, in the accent. */
+  :focus-visible {
+    outline: 1px solid var(--ring);
+    outline-offset: 2px;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * Motion. Three gestures only, each tied to a real audio state: the ring's
+ * breath, the amplitude bars, and the sweep that means "waiting on a network".
+ * Every call site also carries `motion-reduce:animate-none`.
+ * ------------------------------------------------------------------------- */
+@theme {
+  --animate-breathe: breathe 2.6s cubic-bezier(0.22, 0.61, 0.36, 1) infinite;
+  --animate-amp: amp 0.94s ease-in-out infinite alternate;
+  --animate-sweep: sweep 2.4s linear infinite;
+  --animate-pulse-ring: pulse-ring 2.2s ease-out infinite;
+
+  @keyframes breathe {
+    0% {
+      transform: scale(1);
+      opacity: 0.34;
+    }
+    70% {
+      transform: scale(1.12);
+      opacity: 0;
+    }
+    100% {
+      transform: scale(1.12);
+      opacity: 0;
+    }
+  }
+  @keyframes amp {
+    0% {
+      transform: scaleY(0.18);
+    }
+    50% {
+      transform: scaleY(1);
+    }
+    100% {
+      transform: scaleY(0.34);
+    }
+  }
+  @keyframes sweep {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  @keyframes pulse-ring {
+    0% {
+      transform: scale(0.82);
+      opacity: 0.5;
+    }
+    100% {
+      transform: scale(1.6);
+      opacity: 0;
+    }
+  }
+}

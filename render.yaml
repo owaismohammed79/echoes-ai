@@ -1,0 +1,133 @@
+# Render blueprint for Echoes: one FastAPI service and one static frontend.
+#
+# Deploy with:  Render dashboard -> New -> Blueprint -> point at this repository.
+#
+# Two things this file deliberately does NOT contain: secret values, and a
+# catch-all rewrite on the static site. Secrets are `sync: false`, which tells
+# Render to prompt for them in the dashboard, so a key is never committed to the
+# repository it protects. The rewrite is absent because the client has no
+# client-side routes (no router in package.json), so `/` is the only path that
+# exists; a `/*` -> `/index.html` rule would buy nothing and would quietly serve
+# HTML in place of any asset that went missing.
+
+services:
+  # ---------------------------------------------------------------------------
+  # The API: context aggregation, grounded narration, TTS, push-to-talk.
+  # ---------------------------------------------------------------------------
+  - type: web
+    name: echoes-api
+    runtime: python
+    plan: free
+    region: oregon
+    rootDir: server
+    buildCommand: pip install -r requirements.txt
+    # `$PORT` is injected by Render. `main:app` is the ASGI entrypoint
+    # (server/main.py), which calls create_app().
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    autoDeploy: true
+    # Pinned to one on purpose, not for economy. The guardrails, the session
+    # store and the audio-token store are all process-local, so a second
+    # instance means a second allowance, a second daily budget against one cap,
+    # and push-to-talk requests landing where the walk's session is unknown.
+    # /api/health reports each of these as "process_local". Scale up only after
+    # moving the stores to a shared backend.
+    numInstances: 1
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.6"
+
+      # --- Cost guardrails (AGENTS.md 4) ------------------------------------
+      - key: ECHOES_WALK_LIMIT_PER_HOUR
+        value: "5"
+      - key: ECHOES_WALK_LIMIT_WINDOW_SECONDS
+        value: "3600"
+      - key: ECHOES_DAILY_SPEND_CAP_USD
+        value: "5.00"
+      # Render terminates TLS at its own edge and appends the client address, so
+      # exactly one trusted hop. Setting this to 0 here would make every walker
+      # share the edge's IP and exhaust one allowance between them.
+      - key: ECHOES_TRUSTED_PROXY_HOPS
+        value: "1"
+      # The manual kill-switch. Flip to "1" to serve the recorded demo without
+      # waiting for the cap: for a demo day, or an incident.
+      - key: ECHOES_FORCE_DEMO_MODE
+        value: "0"
+      # The remote voice is the point in production; local runs default to the
+      # browser voice so the ElevenLabs free tier is not spent.
+      - key: ECHOES_FORCE_NATIVE_TTS
+        value: "0"
+      # Placeholders are baked into app/config.py so the cap is never inert, but
+      # a budget computed from invented numbers is not a budget. Set these from
+      # the vendors' current price lists; /api/health reports whether you have,
+      # as spend.prices_configured.
+      - key: ECHOES_TTS_PRICE_USD_PER_1K_CHARS
+        sync: false
+      - key: ECHOES_LLM_PRICE_USD_PER_1K_CHARS
+        sync: false
+
+      # --- Origins ----------------------------------------------------------
+      # Comma-separated, with schemes. Set it to the static site's origin, e.g.
+      # "https://echoes-client.onrender.com". The default is "*", which is fine
+      # for a hackathon and wrong for anything holding a session.
+      - key: ECHOES_ALLOWED_ORIGINS
+        sync: false
+
+      # --- Provider keys (set in the dashboard; never committed) ------------
+      # Each is optional by design: an unset key degrades a walk (to Notice
+      # mode, or to the browser's voice) rather than failing it, and
+      # /api/health reports which are live.
+      - key: GEMMA_API_KEY
+        sync: false
+      - key: ELEVENLABS_API_KEY
+        sync: false
+      - key: ELEVENLABS_VOICE_ID
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: SERPAPI_KEY
+        sync: false
+      # Wikimedia rejects requests without a descriptive User-Agent with a 403,
+      # so this is a hard requirement rather than a nicety. Put a real contact
+      # in it.
+      - key: ECHOES_USER_AGENT
+        sync: false
+
+  # ---------------------------------------------------------------------------
+  # The frontend: a static build of client/, served from Render's CDN.
+  # ---------------------------------------------------------------------------
+  - type: web
+    name: echoes-client
+    runtime: static
+    rootDir: client
+    # `npm ci` rather than `npm install`: the lockfile is the contract, and a
+    # deploy that silently resolves different versions is not reproducible.
+    buildCommand: npm ci && npm run build
+    staticPublishPath: ./dist
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "22.11.0"
+    headers:
+      # The bundle is content-hashed by Vite, so it can be cached forever; the
+      # HTML that names it cannot.
+      - path: /assets/*
+        name: Cache-Control
+        value: public, max-age=31536000, immutable
+      - path: /index.html
+        name: Cache-Control
+        value: no-cache
+
+# -----------------------------------------------------------------------------
+# After the first deploy
+# -----------------------------------------------------------------------------
+# 1. Set ECHOES_ALLOWED_ORIGINS on echoes-api to the echoes-client URL once
+#    Render has assigned it.
+# 2. Check /api/health. Anything reported as "process_local" is correct for a
+#    single instance and wrong the moment there are two.
+# 3. Listen to a demo walk: set ECHOES_FORCE_DEMO_MODE=1, walk once, and confirm
+#    X-Demo-Mode: True comes back and /static/demo/segment-01.wav plays. The
+#    kill-switch is only a kill-switch if it has been fired once on purpose.
+# 4. Replace the placeholder clips (server/static/demo) with recorded audio and
+#    set "recorded": true in their manifest. /api/health reports the flag and
+#    lists any clip that is missing.

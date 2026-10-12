@@ -1,0 +1,28 @@
+{
+  "recorded": false,
+  "note": "Generated silent placeholders. Replace with the recorded demo audio and set recorded=true; /api/health reports this flag.",
+  "rate_hz": 8000,
+  "channels": 1,
+  "sample_width_bytes": 2,
+  "reminder": "reminder.wav",
+  "segments": [
+    {
+      "index": 0,
+      "clip": "segment-01.wav",
+      "seconds": 11.93,
+      "bytes": 190900
+    },
+    {
+      "index": 1,
+      "clip": "segment-02.wav",
+      "seconds": 8.5,
+      "bytes": 136044
+    },
+    {
+      "index": 2,
+      "clip": "segment-03.wav",
+      "seconds": 8.64,
+      "bytes": 138328
+    }
+  ]
+}
