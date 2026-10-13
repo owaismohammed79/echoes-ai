@@ -22,7 +22,8 @@ from app.services.geo import haversine_m
 
 logger = logging.getLogger("echoes.sessions")
 
-SESSION_TTL_SECONDS = 900.0
+#: Longer than the longest walk (45 minutes) plus a question after it.
+SESSION_TTL_SECONDS = 3600.0
 
 #: Beyond this distance from where the context was built, the facts no longer
 #: describe where the walker is. Answering confidently about a landmark behind
@@ -41,10 +42,26 @@ class WalkSession:
     history: list[tuple[str, str]] = field(default_factory=list)
     anchor: tuple[float, float] | None = None
     created_at: float = 0.0
+    #: Refreshed on every continuation so a 30-minute walk is not purged at 15.
+    last_seen: float = 0.0
     #: The validated narration the walk spoke, so a follow-up question can
     #: resolve "what was that about the temple?" against the landmarks the model
     #: actually just talked about (docs/audio-streaming.md 10.2).
     narration_text: str = ""
+    #: Walker's chosen length, in minutes. ``None`` is the one-shot path.
+    duration_min: int | None = None
+    mood: str | None = None
+    #: How many cycles have already been generated (the next one to serve).
+    cycle_index: int = 0
+    #: Running sentence index so Channel B tokens never collide across cycles.
+    sentence_index: int = 0
+    used_fact_ids: list[str] = field(default_factory=list)
+    news: list[Any] = field(default_factory=list)
+    weather: Any = None
+    last_serp_at: float = 0.0
+    #: The generic fallback copy is spoken at most once per walk: a model outage
+    #: must not make every cycle repeat the same lines.
+    static_served: bool = False
 
     def remember(self, role: str, text: str) -> None:
         """Record one turn, keeping only the most recent few.
@@ -68,19 +85,34 @@ class SessionStore:
         self._clock = clock
         self._sessions: dict[str, WalkSession] = {}
 
+    def now(self) -> float:
+        """The store's clock. Walk expiry and TTL both read this."""
+        return self._clock()
+
     def create(
         self,
         *,
         facts: Sequence[Any],
         anchor: tuple[float, float] | None = None,
         session_id: str | None = None,
+        duration_min: int | None = None,
+        mood: str | None = None,
+        news: Sequence[Any] = (),
+        weather: Any = None,
     ) -> WalkSession:
         self._purge()
+        stamp = self._clock()
         session = WalkSession(
             session_id=session_id or secrets.token_urlsafe(16),
             facts=list(facts),
             anchor=anchor,
-            created_at=self._clock(),
+            created_at=stamp,
+            last_seen=stamp,
+            duration_min=duration_min,
+            mood=mood,
+            news=list(news),
+            weather=weather,
+            last_serp_at=stamp,
         )
         self._sessions[session.session_id] = session
         return session
@@ -92,10 +124,14 @@ class SessionStore:
         session = self._sessions.get(session_id)
         if session is None:
             return None
-        if self._clock() - session.created_at >= self._ttl:
+        if self._clock() - session.last_seen >= self._ttl:
             self._sessions.pop(session_id, None)
             return None
         return session
+
+    def touch(self, session: WalkSession) -> None:
+        """Keep a live walk from expiring mid-route."""
+        session.last_seen = self._clock()
 
     def __len__(self) -> int:
         self._purge()
@@ -104,7 +140,8 @@ class SessionStore:
     def _purge(self) -> None:
         now = self._clock()
         for key, session in list(self._sessions.items()):
-            if now - session.created_at >= self._ttl:
+            stamp = session.last_seen or session.created_at
+            if now - stamp >= self._ttl:
                 self._sessions.pop(key, None)
 
 

@@ -30,6 +30,7 @@ import type { MutableRefObject } from "react";
 
 import { VoiceActivityDetector, type VadConfig } from "@/lib/vad";
 import { getAudioContext } from "@/lib/audio-context";
+import { stopAllTracks } from "@/lib/audio-lifecycle";
 
 /** RMS above which the microphone is considered to be carrying a voice. */
 export const SILENCE_RMS = 0.015;
@@ -171,10 +172,10 @@ export function useContinuousVad(
     bufferRef.current = null;
 
     // The light must go out on every path: a muted or ended walk that leaves the
-    // microphone open is a privacy bug, not a state.
-    streamRef.current?.getTracks().forEach((track) => track.stop());
+    // microphone open is a privacy bug, not a state. Never close the shared
+    // AudioContext — that would throw away the iOS unlock for the next walk.
+    stopAllTracks(streamRef.current);
     streamRef.current = null;
-    // The context is the app's, not ours: drop the source, never close it.
     ctxRef.current = null;
 
     rollingRef.current = [];

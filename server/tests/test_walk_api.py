@@ -25,7 +25,9 @@ from tests.helpers import (
     build_container,
     client_for,
     fact,
+    frame_text,
     ndjson,
+    spoken,
 )
 
 STORY_RESPONSE = (
@@ -91,26 +93,22 @@ def test_walk_streams_sentence_frames_with_audio_urls(
     assert resp.headers["content-type"].startswith("application/x-ndjson")
 
     frames = ndjson(resp)
-    # greeting, sentence, sentence, hand-off, reminder, done
-    assert [f["type"] for f in frames] == [
-        "sentence",
-        "sentence",
-        "sentence",
-        "sentence",
-        "reminder",
-        "done",
-    ]
+    texts = spoken(frames)
+    assert frames[0]["type"] == "data"
+    assert frames[-1]["type"] == "indicator"
+    assert frames[-1]["status"] == "walk_complete"
+    assert any(f.get("role") == "reminder" for f in frames)
 
     # The greeting is spoken first and injected in code, not generated: an
     # uncited greeting sentence would be deleted by the validator.
-    greeting = frames[0]
-    assert greeting["text"].startswith("Hello there.")
+    greeting = texts[0]
+    assert frame_text(greeting).startswith("Hello there.")
     assert greeting["citations"] == []
     assert greeting["audio_url"].startswith("/api/audio/")
 
-    first = frames[1]
+    first = texts[1]
     assert first["index"] == 1
-    assert first["text"] == "Nelson's Column rises over the square."
+    assert frame_text(first) == "Nelson's Column rises over the square."
     assert first["citations"] == [FID]
     assert first["source_urls"] == ["https://en.wikipedia.org/wiki/Nelson%27s_Column"]
     assert first["use_native_tts"] is False
@@ -118,7 +116,7 @@ def test_walk_streams_sentence_frames_with_audio_urls(
     assert first["mode"] == "STORY"
 
     # The pacing hand-off closes the block, also injected in code.
-    assert frames[3]["text"].startswith("I'll leave you to wander")
+    assert frame_text(texts[3]).startswith("I'll leave you to wander")
 
     # The tag never reaches the synthesis layer.
     assert "[cite:" not in "".join(tts.spoken)
@@ -144,7 +142,7 @@ def test_walk_greeting_names_the_real_conditions(
     with client_for(container) as client:
         frames = ndjson(client.post("/api/walk", json={"lat": 51.507, "lon": -0.127}))
 
-    greeting = frames[0]["text"]
+    greeting = frame_text(spoken(frames)[0])
     assert greeting.startswith("Hello there.")
     assert "light rain" in greeting
     # Conditions travel in the done frame for the client too.
@@ -175,7 +173,7 @@ def test_walk_greeting_uses_the_walkers_clock_not_the_servers(
     with client_for(container) as client:
         frames = ndjson(client.post("/api/walk", json={"lat": 61.218, "lon": -149.9}))
 
-    greeting = frames[0]["text"]
+    greeting = frame_text(spoken(frames)[0])
     assert greeting == "Hello there. It's a light drizzle evening here. Let's begin our walk."
 
 
@@ -236,14 +234,13 @@ def test_walk_stream_carries_conditions_mood_and_five_citations(
                 "lat": 12.9638,
                 "lon": 77.548,
                 "mood": "Sad/Struggling",
-                "duration": 20,
             },
         )
 
     frames = ndjson(resp)
-    sentences = [f for f in frames if f["type"] == "sentence"]
+    sentences = spoken(frames)
     cited = [f for f in sentences if f["citations"]]
-    texts = [f["text"] for f in sentences]
+    texts = [frame_text(f) for f in sentences]
 
     # 1. At least five grounded sentences, each with a source to show.
     assert len(cited) >= 5
@@ -267,7 +264,7 @@ def test_walk_stream_carries_conditions_mood_and_five_citations(
 
     # 4. The atmospheric opener survived, uncited and without a source.
     opener = next(
-        f for f in sentences if f["text"] == "The evening light is soft here."
+        f for f in sentences if frame_text(f) == "The evening light is soft here."
     )
     assert opener["citations"] == []
     assert opener["source_urls"] == []
@@ -275,7 +272,8 @@ def test_walk_stream_carries_conditions_mood_and_five_citations(
     # 5. Nothing repeated, nothing empty, and the walk closes without dropping.
     assert len(texts) == len(set(texts))
     assert all(t.strip() for t in texts)
-    assert frames[-1]["type"] == "done"
+    assert frames[-1]["type"] == "indicator"
+    assert frames[-1]["status"] == "walk_complete"
     assert frames[-1]["rejections"] == []
 
 
@@ -307,10 +305,10 @@ def test_walk_speaks_the_mood_encouragement_line_uncited(
             )
         )
 
-    spoken = next(
-        f for f in frames if f["type"] == "sentence" and f["text"] == encouragement
+    line = next(
+        f for f in spoken(frames) if frame_text(f) == encouragement
     )
-    assert spoken["citations"] == []
+    assert line["citations"] == []
     assert frames[-1]["mode"] == "STORY"
 
 
@@ -362,20 +360,18 @@ def test_walk_weaves_a_local_news_reference_the_validator_keeps(
             )
         )
 
-    spoken = next(
-        f for f in frames if f["type"] == "sentence" and f["text"] == news_line
-    )
-    assert spoken["citations"] == []
-    assert "[news]" not in spoken["text"]
+    line = next(f for f in spoken(frames) if frame_text(f) == news_line)
+    assert line["citations"] == []
+    assert "[news]" not in frame_text(line)
 
     prompt = llm.calls[0]["user"]
     assert "RECENT LOCAL NEWS" in prompt
     assert "Headline: Residents protest against Vijayanagar tree poisoning" in prompt
 
     # Nothing was dropped to achieve it.
-    assert frames[-1]["type"] == "done"
+    assert frames[-1]["type"] == "indicator"
     assert frames[-1]["rejections"] == []
-    assert len([f for f in frames if f["type"] == "sentence" and f["citations"]]) >= 4
+    assert len([f for f in spoken(frames) if f["citations"]]) >= 4
 
 
 def test_walk_stores_the_narration_for_followup_questions(
@@ -404,8 +400,8 @@ def test_walk_appends_the_mandatory_reminder_as_a_static_asset(
     with client_for(container) as client:
         frames = ndjson(client.post("/api/walk", json={"lat": 51.507, "lon": -0.127}))
 
-    reminder = next(f for f in frames if f["type"] == "reminder")
-    assert reminder["text"] == PEDESTRIAN_REMINDER
+    reminder = next(f for f in frames if f.get("role") == "reminder" and f["type"] == "text")
+    assert frame_text(reminder) == PEDESTRIAN_REMINDER
     # `.wav`, and a file that exists: the path used to point at `/static/
     # reminder.mp3`, which was never mounted and never on disk, so the reminder
     # frame promised the client a 404. tests/test_limits.py now fetches it.
@@ -428,7 +424,8 @@ def test_walk_done_frame_reports_session_and_health(
         frames = ndjson(client.post("/api/walk", json={"lat": 51.507, "lon": -0.127}))
 
     done = frames[-1]
-    assert done["type"] == "done"
+    assert done["type"] == "indicator"
+    assert done["status"] == "walk_complete"
     assert done["mode"] == "STORY"
     assert done["degraded"] is False
     assert done["used_static_fallback"] is False
@@ -462,7 +459,7 @@ def test_walk_flags_native_tts_proactively_when_unconfigured(
     with client_for(container) as client:
         frames = ndjson(client.post("/api/walk", json={"lat": 51.507, "lon": -0.127}))
 
-    sentence = frames[0]
+    sentence = spoken(frames)[0]
     assert sentence["use_native_tts"] is True
     assert "audio_url" not in sentence
     assert sentence["tts_reason"] == "tts_not_configured"
@@ -480,7 +477,7 @@ def test_walk_degrades_to_static_copy_without_an_llm(
     done = frames[-1]
     assert done["used_static_fallback"] is True
     assert done["degraded"] is True
-    assert any(f["type"] == "sentence" for f in frames)
+    assert any(f["type"] == "text" for f in frames)
 
 
 def test_walk_rejects_out_of_range_coordinates() -> None:
@@ -550,7 +547,7 @@ def test_walk_issued_token_is_redeemable_by_its_own_session(
     with client_for(container) as client:
         frames = ndjson(client.post("/api/walk", json={"lat": 51.507, "lon": -0.127}))
         session_id = frames[-1]["session_id"]
-        audio_url = frames[0]["audio_url"]
+        audio_url = spoken(frames)[0]["audio_url"]
         audio = client.get(audio_url, headers={"x-session-id": session_id})
 
     assert audio.status_code == 200
@@ -565,7 +562,7 @@ def test_walk_issued_token_is_not_redeemable_by_another_session(
 
     with client_for(container) as client:
         frames = ndjson(client.post("/api/walk", json={"lat": 51.507, "lon": -0.127}))
-        audio_url = frames[0]["audio_url"]
+        audio_url = spoken(frames)[0]["audio_url"]
         audio = client.get(audio_url, headers={"x-session-id": "someone-else"})
 
     assert audio.status_code == 404

@@ -226,3 +226,17 @@ def ndjson(response: httpx.Response) -> list[dict[str, Any]]:
     import json
 
     return [json.loads(line) for line in response.text.splitlines() if line.strip()]
+
+
+def spoken(frames: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Narration text frames, excluding the pedestrian reminder."""
+    return [
+        frame
+        for frame in frames
+        if frame.get("type") in {"text", "sentence"}
+        and frame.get("role") != "reminder"
+    ]
+
+
+def frame_text(frame: dict[str, Any]) -> str:
+    return str(frame.get("content") or frame.get("text") or "")

@@ -39,11 +39,14 @@ logger = logging.getLogger("echoes.llm.gemma")
 DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com"
 DEFAULT_MODEL = "gemma-4-26b-a4b-it"
 
-#: The second rung of the cascade: the same Gemma family, reached through Groq's
+#: The second rung of the cascade: a fast open model reached through Groq's
 #: OpenAI-compatible endpoint under a separate key, when Google AI Studio is
-#: returning 5xx or timing out.
+#: returning 5xx or timing out. ``gemma2-9b-it`` was shut down by Groq on
+#: 2025-10-08 (HTTP 400 ``model_decommissioned``); Groq's deprecation notice
+#: names ``llama-3.1-8b-instant`` as the replacement. Override per deployment
+#: with ``GROQ_LLM_MODEL``: a model id is configuration, not a constant.
 DEFAULT_GROQ_BASE_URL = "https://api.groq.com/openai/v1"
-DEFAULT_GROQ_MODEL = "gemma2-9b-it"
+DEFAULT_GROQ_MODEL = "llama-3.1-8b-instant"
 DEFAULT_GROQ_TIMEOUT_SECONDS = 10.0
 
 #: Statuses that mean "the provider is having a moment" rather than "this

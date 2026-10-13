@@ -35,6 +35,7 @@ from app.services.prompts import (
     PEDESTRIAN_REMINDER,
     STORY_SYSTEM,
     NoticeContext,
+    build_cycle_user_prompt,
     build_notice_user_prompt,
     build_story_user_prompt,
 )
@@ -191,6 +192,9 @@ async def generate_narration(
     mood: str | None = None,
     weather: Any = None,
     news: Sequence[Any] = (),
+    cycle_kind: str = "full",
+    cycle_words: int | None = None,
+    already_said: str = "",
     max_story_sentences: int = MAX_STORY_SENTENCES,
     max_notice_sentences: int = MAX_NOTICE_SENTENCES,
 ) -> NarrationResult:
@@ -214,7 +218,58 @@ async def generate_narration(
     degraded = False
     last_error: str | None = None
 
-    if mode == "STORY" and facts:
+    if cycle_kind == "atmosphere" or (cycle_kind == "local" and not facts):
+        news_left_atm = MAX_NEWS_REFERENCES if news else 0
+        # Weather/mood/time: no FactObject, so STORY would otherwise degrade to
+        # NOTICE. The atmosphere flag lets uncited clock/temp sentences through
+        # while still stripping historical claims (validation.rules).
+        def validate_atmosphere(raw: str) -> ValidatedSentence:
+            nonlocal news_left_atm
+            sentence = validate_story_sentence(
+                raw,
+                valid_fact_ids={},
+                allow_uncited_framing=True,
+                allow_news_reference=news_left_atm > 0,
+                allow_atmosphere=True,
+            )
+            if sentence.news:
+                news_left_atm -= 1
+            return sentence
+
+        outcome = await _stream_and_validate(
+            provider,
+            system=STORY_SYSTEM,
+            user=build_cycle_user_prompt(
+                "atmosphere",
+                mood=mood,
+                weather=weather,
+                news=news,
+                words=cycle_words,
+                sentences=max_story_sentences if cycle_words else None,
+                already_said=already_said,
+            ),
+            validate=validate_atmosphere,
+            sentence_limit=max_story_sentences,
+        )
+        rejections.extend(outcome.rejections)
+        last_error = outcome.error
+        if outcome.kept:
+            return _decorate(
+                NarrationResult(
+                    mode="STORY",
+                    sentences=outcome.kept,
+                    rejections=rejections,
+                    error=outcome.error,
+                ),
+                greeting=greeting,
+                handoff=handoff,
+            )
+        logger.info(
+            "atmosphere cycle produced no valid sentences (%s); degrading to NOTICE",
+            [r.value for r in rejections],
+        )
+        degraded = True
+    elif mode == "STORY" and facts:
         fact_sources = {
             fact.fact_id: getattr(fact, "source_url", "") for fact in facts
         }
@@ -246,12 +301,26 @@ async def generate_narration(
                 logger.info("speaking a framing sentence uncited: %.120s", raw)
             return sentence
 
+        user_prompt = (
+            build_cycle_user_prompt(
+                cycle_kind,
+                facts=facts,
+                mood=mood,
+                weather=weather,
+                news=news,
+                words=cycle_words,
+                sentences=max_story_sentences if cycle_words else None,
+                already_said=already_said,
+            )
+            if cycle_kind in {"wiki", "local"}
+            else build_story_user_prompt(
+                facts, mood=mood, weather=weather, news=news
+            )
+        )
         outcome = await _stream_and_validate(
             provider,
             system=STORY_SYSTEM,
-            user=build_story_user_prompt(
-                facts, mood=mood, weather=weather, news=news
-            ),
+            user=user_prompt,
             validate=validate_framing_aware,
             sentence_limit=max_story_sentences,
         )

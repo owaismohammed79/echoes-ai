@@ -354,6 +354,31 @@ def test_framing_exemption_still_enforces_the_safety_denylists() -> None:
     assert exc.value.reason is RejectionReason.PHYSICAL_ASSERTION
 
 
+def test_atmosphere_allows_a_clock_time_that_framing_would_reject() -> None:
+    """Weather cycles may name the provider's clock; wiki claims still need a tag."""
+    clock = "It is 6:42 PM and the air is cooling toward sunset."
+    with pytest.raises(SentenceRejected):
+        validate_story_sentence(
+            clock, valid_fact_ids=SOURCES, allow_uncited_framing=True
+        )
+    out = validate_story_sentence(
+        clock,
+        valid_fact_ids=SOURCES,
+        allow_uncited_framing=True,
+        allow_atmosphere=True,
+    )
+    assert out.citations == ()
+
+    with pytest.raises(SentenceRejected) as exc:
+        validate_story_sentence(
+            "The fort was built here.",
+            valid_fact_ids=SOURCES,
+            allow_atmosphere=True,
+            allow_uncited_framing=True,
+        )
+    assert exc.value.reason is RejectionReason.NO_CITATION
+
+
 def test_framing_exemption_leaves_cited_sentences_alone() -> None:
     """A cited sentence about a place is still exactly as valid as before."""
     out = validate_story_sentence(

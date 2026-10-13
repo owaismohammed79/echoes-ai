@@ -210,31 +210,54 @@ def demo_walk_frames(
     sync, and would rot the first time the live frames changed.
     """
     for index, segment in enumerate(DEMO_SEGMENTS):
+        at = index + index_offset
+        audio_url = f"/static/{DEMO_CLIP_DIR}/{segment.clip}"
         yield {
-            "type": "sentence",
-            "index": index + index_offset,
+            "type": "text",
+            "content": segment.text,
             "text": segment.text,
+            "index": at,
             "citations": list(segment.citations),
             "source_urls": list(segment.source_urls),
-            # The clip is pre-recorded, so no provider was asked to speak.
             "use_native_tts": False,
             "mode": DEMO_MODE,
-            "audio_url": f"/static/{DEMO_CLIP_DIR}/{segment.clip}",
+            "audio_url": audio_url,
+            "demo": True,
+        }
+        yield {
+            "type": "audio",
+            "url": audio_url,
+            "audio_url": audio_url,
+            "index": at,
+            "use_native_tts": False,
             "demo": True,
         }
 
+    reminder_url = f"/static/{REMINDER_CLIP}"
     yield {
-        "type": "reminder",
+        "type": "text",
+        "content": PEDESTRIAN_REMINDER,
         "text": PEDESTRIAN_REMINDER,
-        "audio_url": f"/static/{REMINDER_CLIP}",
+        "audio_url": reminder_url,
+        "role": "reminder",
         "demo": True,
     }
     yield {
-        "type": "done",
+        "type": "audio",
+        "url": reminder_url,
+        "audio_url": reminder_url,
+        "role": "reminder",
+        "demo": True,
+    }
+    yield {
+        "type": "indicator",
+        "status": "walk_complete",
+        "complete": True,
         "mode": DEMO_MODE,
         "degraded": False,
         "used_static_fallback": True,
         "session_id": session_id,
         "rejections": [],
         "demo": True,
+        "grace_ms": 45_000,
     }

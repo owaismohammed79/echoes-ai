@@ -142,30 +142,43 @@ export default function EchoesApp({ engine = realEngine }: { engine?: WalkEngine
   return (
     <div className="relative flex h-[100dvh] w-full flex-col overflow-hidden bg-[#09090B] text-white">
       {/* TOP — the name, quiet; the walk's technical readout on the right */}
-      <header className="flex items-center justify-between px-5 pb-[18px] pt-[22px]">
-        <div className="flex items-center gap-2 md:gap-3">
-          <img
-            src="/assets/echoes-logo.svg"
-            alt="Echoes Logo"
-            className="h-7 w-7 md:h-9 md:w-9"
-          />
-          <h1 className="text-[14px] tracking-tight text-white/40 md:text-[18px]">
-            Echoes
-          </h1>
-        </div>
-        <div className="flex items-baseline gap-[12px]">
-          {walk.fix && (
-            <TechLabel>
-              {walk.fix.lat.toFixed(3)}, {walk.fix.lon.toFixed(3)}
+      <header className="relative z-[45] flex flex-col gap-2 px-5 pb-[18px] pt-[22px]">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex min-w-0 items-center gap-2 md:gap-3">
+            <img
+              src="/assets/echoes-logo.svg"
+              alt="Echoes Logo"
+              className="h-7 w-7 md:h-9 md:w-9"
+            />
+            <h1 className="text-[14px] tracking-tight text-white/40 md:text-[18px]">
+              Echoes
+            </h1>
+          </div>
+          {live ? (
+            <button
+              type="button"
+              onClick={handleEndWalk}
+              aria-label="End walk"
+              className="shrink-0 border border-white/40 px-[10px] py-[7px] font-mono text-[10px] tracking-[0.064em] text-white/90 uppercase transition-colors hover:border-white hover:text-white"
+            >
+              End walk
+            </button>
+          ) : (
+            <TechLabel tone="muted" className="md:text-[12px]">
+              no walk
             </TechLabel>
           )}
-          <TechLabel tone={live ? "ink" : "muted"} className="md:text-[12px]">
-            {live ? walk.mode.toLowerCase() : "no walk"}
-          </TechLabel>
-
-          {/* magicui Number Ticker: the walk's own clock, counting up in
-              seconds. Real data, so it belongs in the technical readout. */}
-          {live && (
+        </div>
+        {live && (
+          <div className="flex items-baseline justify-end gap-[12px]">
+            {walk.fix && (
+              <TechLabel>
+                {walk.fix.lat.toFixed(3)}, {walk.fix.lon.toFixed(3)}
+              </TechLabel>
+            )}
+            <TechLabel tone="ink" className="md:text-[12px]">
+              {walk.mode.toLowerCase()}
+            </TechLabel>
             <span className="flex items-baseline gap-[3px]">
               <NumberTicker
                 value={walk.seconds}
@@ -174,8 +187,8 @@ export default function EchoesApp({ engine = realEngine }: { engine?: WalkEngine
               />
               <TechLabel tone="faint">s</TechLabel>
             </span>
-          )}
-        </div>
+          </div>
+        )}
       </header>
 
       {/* CENTER — one object, plus the sentence being spoken */}
@@ -242,15 +255,6 @@ export default function EchoesApp({ engine = realEngine }: { engine?: WalkEngine
                   className="font-mono text-[10px] tracking-[0.064em] text-white/45 uppercase transition-colors hover:text-white/80"
                 >
                   pocket mode
-                </button>
-              )}
-              {live && (
-                <button
-                  type="button"
-                  onClick={handleEndWalk}
-                  className="font-mono text-[10px] tracking-[0.064em] text-white/45 uppercase transition-colors hover:text-white/80"
-                >
-                  end walk
                 </button>
               )}
             </span>

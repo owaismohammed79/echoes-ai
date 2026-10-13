@@ -117,7 +117,7 @@ export function SourceDrawer({
       </button>
 
       <Drawer.Portal>
-        <Drawer.Overlay className="fixed inset-0 z-40 bg-[#09090B]/60" />
+        <Drawer.Overlay className="fixed inset-x-0 bottom-0 top-24 z-40 bg-[#09090B]/60" />
         <Drawer.Content
           className="fixed inset-x-0 bottom-0 z-50 outline-none"
           aria-describedby={undefined}

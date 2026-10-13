@@ -37,6 +37,11 @@ from app.services.fact_kind import priority
 
 logger = logging.getLogger("echoes.context.aggregator")
 
+async def _immediate(value):
+    """Already-resolved awaitable, for skipping a paid source on a refresh."""
+    return value
+
+
 __all__ = ["aggregate_context", "decide_mode"]
 
 
@@ -161,7 +166,10 @@ def _further_ladder(
 
 
 async def _gather_wikipedia_facts(
-    client: httpx.AsyncClient, lat: float, lon: float
+    client: httpx.AsyncClient,
+    lat: float,
+    lon: float,
+    budget: float | None = None,
 ) -> list[FactObject]:
     """Fetch Wikipedia facts, widening the search until there is enough material.
 
@@ -176,7 +184,7 @@ async def _gather_wikipedia_facts(
     would multiply the 3.0s ceiling by the number of steps, and the walker's
     first audio byte would be late by the same factor (PRD section 5).
     """
-    budget = _timeout_budget()
+    budget = budget if budget is not None else _timeout_budget()
     deadline = time.monotonic() + budget
     facts: list[FactObject] = []
 
@@ -262,20 +270,48 @@ def _rank(fact: FactObject) -> tuple[int, float]:
 
 
 async def aggregate_context(
-    client: httpx.AsyncClient, *, lat: float, lon: float
+    client: httpx.AsyncClient,
+    *,
+    lat: float,
+    lon: float,
+    paid: bool = True,
+    prior: ContextResponse | None = None,
+    budget: float | None = None,
 ) -> ContextResponse:
-    """Aggregate Wikipedia + park + news data into facts and a routing flag."""
+    """Aggregate Wikipedia + park + news data into facts and a routing flag.
+
+    ``paid`` is SerpApi (parks + news). Continuations refresh Wikipedia and
+    weather every cycle -- those are free -- and only re-query SerpApi when
+    several minutes have passed, so one walk does not spend a park credit per
+    ambient gap (AGENTS.md 4).
+
+    ``budget`` overrides the network ceiling. The first request of a walk keeps
+    the default 3.0s because the walker is waiting for the first word; a
+    continuation runs while they are in an ambient gap, so it may be patient
+    and lose fewer facts to a slow upstream.
+    """
     # Concurrent, not sequential: total latency stays near the slowest single
     # call (~3.0s ceiling) rather than their sum. The Wikipedia branch is itself
     # a ladder, but it carries its own single budget, so widening cannot stretch
     # the ceiling either.
-    deadline = time.monotonic() + _timeout_budget()
+    net_budget = budget if budget is not None else _timeout_budget()
+    deadline = time.monotonic() + net_budget
+    prior_parks = (
+        [fact for fact in prior.facts if fact.kind == "park"] if prior else []
+    )
     wiki_facts, park_facts, conditions = await asyncio.gather(
         # Wrapped even though the ladder already degrades per step: the
         # aggregator's contract is that *no* source failure reaches the walk as
         # an HTTP error, and that is enforced at the boundary, not assumed.
-        _safe_fetch(_gather_wikipedia_facts(client, lat, lon), "Wikipedia"),
-        _safe_fetch(parks.fetch_park_facts(client, lat, lon), "SerpApi"),
+        _safe_fetch(
+            _gather_wikipedia_facts(client, lat, lon, budget=net_budget),
+            "Wikipedia",
+        ),
+        (
+            _safe_fetch(parks.fetch_park_facts(client, lat, lon), "SerpApi")
+            if paid
+            else _immediate(list(prior_parks))
+        ),
         _safe_weather(weather.fetch_weather(client, lat, lon)),
     )
 
@@ -289,10 +325,12 @@ async def aggregate_context(
     # what the facts just produced. It is still bounded by the same request
     # budget -- ``min`` of its own 1.5s ceiling and whatever is left of the 3.0s
     # -- so it can never extend the walk's time-to-first-audio.
-    news: list[NewsItem] = []
+    news: list[NewsItem] = list(prior.news) if prior and not paid else []
     hint = _place_hint(facts)
     remaining = deadline - time.monotonic()
-    if remaining <= 0:
+    if not paid:
+        pass
+    elif remaining <= 0:
         logger.warning("context budget exhausted; news not attempted")
     else:
         news = await _safe_fetch(

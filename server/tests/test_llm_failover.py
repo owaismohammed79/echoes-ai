@@ -140,7 +140,8 @@ def test_groq_posts_the_bearer_key_and_streams() -> None:
     collect(_groq(handler).stream(system="SYSTEM", user="USER"))
     assert seen["url"].endswith("/chat/completions")
     assert seen["auth"] == "Bearer groq-key"
-    assert seen["payload"]["model"] == "gemma2-9b-it"
+    # gemma2-9b-it was decommissioned by Groq; the default must be a live model.
+    assert seen["payload"]["model"] == "llama-3.1-8b-instant"
     assert seen["payload"]["stream"] is True
     assert seen["payload"]["messages"][0] == {"role": "system", "content": "SYSTEM"}
 

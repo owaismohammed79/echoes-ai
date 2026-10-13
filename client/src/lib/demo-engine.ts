@@ -42,6 +42,8 @@ export interface Segment {
   text: string;
   /** The [[fact_id]] this sentence is grounded in, when there is one. */
   citation: string | null;
+  role?: "narration" | "pause" | "grace" | "reminder";
+  durationMs?: number;
 }
 
 export interface Fix {
@@ -71,6 +73,17 @@ export interface Narration {
    * (AGENTS.md section 2) -- so a walk without one simply carries no reminder.
    */
   reminder?: string;
+  /** Server said the walk is over. No further cycles. */
+  complete?: boolean;
+  /** Server-dictated ambient gap before the next cycle fetch, in ms. */
+  pauseMs?: number;
+  /**
+   * Ambient silence to play after a final cycle that finished short of the
+   * chosen duration, so the walk still ends on time. Server-dictated.
+   */
+  padMs?: number;
+  /** Post-walk Q&A window, in ms. */
+  graceMs?: number;
 }
 
 /**
@@ -114,6 +127,8 @@ export interface WalkEngine {
     mode: Mode;
     fix: Fix;
     prefs?: WalkPrefs;
+    /** Same walk, next cycle. Reuses the session; does not spend a walk credit. */
+    continuation?: boolean;
     onPartial?: (partial: PartialNarration) => void;
   }): Promise<Narration>;
   /** The recorded clip, or null when the microphone gave us nothing. */
@@ -217,6 +232,7 @@ export const demoEngine: WalkEngine = {
         facts: [],
         timings: { context: 214, walk: 0 },
         segments: DEMO_NOTICE,
+        complete: true,
       };
     }
     return {
@@ -224,6 +240,7 @@ export const demoEngine: WalkEngine = {
       facts: DEMO_FACTS,
       timings: { context: 612, walk: 431 },
       segments: DEMO_STORY,
+      complete: true,
     };
   },
 

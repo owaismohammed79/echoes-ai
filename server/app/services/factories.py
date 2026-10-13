@@ -39,8 +39,8 @@ __all__ = [
 def build_llm_provider() -> LLMProvider | None:
     """The narration cascade, or None when nothing is configured.
 
-    Primary is Google AI Studio (Gemma 4); secondary is Groq's ``gemma2-9b-it``,
-    reached under a separate key when AI Studio returns 5xx or times out. Both
+    Primary is Google AI Studio (Gemma 4); secondary is Groq's ``llama-3.1-8b-instant``
+    (``GROQ_LLM_MODEL`` overrides), reached under a separate key when AI Studio returns 5xx or times out. Both
     are wrapped in a :class:`FailoverLLMProvider` so even a single configured
     provider gets the retry budget and the structured outage signal, rather than
     failing straight to static copy.

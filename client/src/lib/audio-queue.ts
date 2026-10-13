@@ -142,6 +142,17 @@ export class AudioQueue {
     this.advance();
   }
 
+  /**
+   * Resume if the OS paused us (screen lock, tab hide) but the walker did not.
+   * ``held`` is the user-pause flag; it must stay paused until they tap.
+   */
+  resumeIfPaused(): boolean {
+    const el = this.el;
+    if (this.held || !el || !el.paused) return false;
+    void el.play().catch(() => {});
+    return true;
+  }
+
   /** Held: the current clip keeps its position until play() again. */
   pause(): void {
     this.held = true;
@@ -213,6 +224,11 @@ export class AudioQueue {
     this.releaseUrl();
     if (done) this.handlers.onEnd(done.id);
     if (this.held) return;
+    // ``onEnd`` may itself have started the next clip (the last sentence of a
+    // cycle starts the ambient bed). Advancing again here would orphan that
+    // clip: its own `ended` would then find no current clip, never report
+    // ``onEnd``, and the walk would stall behind the silence it just started.
+    if (this.current) return;
     // The silent unlock clip finishing is not the queue draining.
     if (!done && this.items.length === 0) return;
     this.advance();

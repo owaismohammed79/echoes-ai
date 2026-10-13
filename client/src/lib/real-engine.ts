@@ -280,6 +280,8 @@ function createRealEngine(): WalkEngine {
   // --- Per-walk state -----------------------------------------------------
   let sessionId: string | null = null;
   let lastFix: Fix | null = null;
+  /** Accumulated across cycles so continuation appends rather than replacing. */
+  let walkSegments: Segment[] = [];
   /** index -> audio source, populated as `sentence` frames arrive. */
   const sentenceAudio = new Map<number, SentenceAudio>();
   /** The pre-rendered reminder the backend appends, which the controller speaks as the disclaimer. */
@@ -354,23 +356,26 @@ function createRealEngine(): WalkEngine {
       return fix;
     },
 
-    async narrate({ mode, fix, onPartial, prefs }) {
+    async narrate({ mode, fix, onPartial, prefs, continuation }) {
       const walkStarted = performance.now();
-      sessionId = newSessionId();
       lastFix = fix;
-      // Every walk starts clean: a clip fetched for the last one must not speak
-      // into this one, and a stale token must not be reused.
-      sentenceAudio.clear();
-      fetchedAudio.clear();
-      answerAudio.clear();
-      reminder = null;
-      qa = null;
+      if (!continuation) {
+        sessionId = newSessionId();
+        walkSegments = [];
+        // Every walk starts clean: a clip fetched for the last one must not speak
+        // into this one, and a stale token must not be reused.
+        sentenceAudio.clear();
+        fetchedAudio.clear();
+        answerAudio.clear();
+        reminder = null;
+        qa = null;
+      }
 
-      // The facts are not in the walk stream, so they come from /api/context.
-      // Started now and awaited only when the first sentence needs them, so it
-      // overlaps the walk's own aggregation rather than adding a round trip in
-      // front of it.
-      const contextPromise = fetchContext(fix, prefs).catch(() => null);
+      // GPS refresh on a continuation is /api/walk's job (server-gated SerpApi).
+      // Calling /api/context again would spend a second parks+news query.
+      const contextPromise = continuation
+        ? Promise.resolve(contextCache?.value ?? null)
+        : fetchContext(fix, prefs).catch(() => null);
 
       const res = await fetch(api("/api/walk"), {
         method: "POST",
@@ -392,8 +397,11 @@ function createRealEngine(): WalkEngine {
 
       const context = await contextPromise;
       const contextFacts = context?.facts ?? [];
-      const segments: Segment[] = [];
       let resolvedMode: Mode = context?.mode ?? mode;
+      let walkComplete = false;
+      let pauseMs: number | undefined;
+      let graceMs: number | undefined;
+      let padMs: number | undefined;
       // Every cited sentence frame, kept so the walk still has sources when
       // /api/context fails: the frames carry each citation and its source URL,
       // so facts can be rebuilt from them rather than lost.
@@ -402,46 +410,83 @@ function createRealEngine(): WalkEngine {
       const factsNow = () =>
         contextFacts.length ? contextFacts : factsFromFrames(cited);
 
+      const emitPartial = (remoteAudio?: boolean) => {
+        onPartial?.({
+          mode: resolvedMode,
+          facts: factsNow(),
+          segments: walkSegments.slice(),
+          remoteAudio,
+        });
+      };
+
+      const pushText = (frame: WalkFrame) => {
+        const index =
+          typeof frame.index === "number" ? frame.index : walkSegments.length;
+        const text = asString(frame.content) ?? asString(frame.text) ?? "";
+        const citations = asStringArray(frame.citations);
+        const sourceUrls = asStringArray(frame.source_urls);
+        const url = asString(frame.audio_url) ?? asString(frame.url);
+        const native = frame.use_native_tts === true;
+        const role = asString(frame.role);
+        sentenceAudio.set(index, { url, native });
+        if (role === "reminder") {
+          if (url && text) reminder = { url, text };
+        }
+        while (walkSegments.length < index) {
+          walkSegments.push({ text: "", citation: null });
+        }
+        const segment: Segment = {
+          text,
+          citation: citations[0] ?? null,
+          role: role === "reminder" ? "reminder" : "narration",
+        };
+        if (index < walkSegments.length) walkSegments[index] = segment;
+        else walkSegments.push(segment);
+        cited.push({ citations, sourceUrls, text });
+        resolvedMode = asMode(frame.mode) ?? resolvedMode;
+        emitPartial(url !== undefined);
+      };
+
       const handle = (frame: WalkFrame): void => {
-        if (frame.type === "sentence") {
+        if (frame.type === "text" || frame.type === "sentence") {
+          pushText(frame);
+          return;
+        }
+
+        if (frame.type === "audio") {
           const index =
-            typeof frame.index === "number" ? frame.index : segments.length;
-          const text = asString(frame.text) ?? "";
-          const citations = asStringArray(frame.citations);
-          const sourceUrls = asStringArray(frame.source_urls);
+            typeof frame.index === "number" ? frame.index : walkSegments.length - 1;
           sentenceAudio.set(index, {
-            url: asString(frame.audio_url),
+            url: asString(frame.url) ?? asString(frame.audio_url),
             native: frame.use_native_tts === true,
-          });
-          segments.push({ text, citation: citations[0] ?? null });
-          cited.push({ citations, sourceUrls, text });
-          resolvedMode = asMode(frame.mode) ?? resolvedMode;
-          // Handed over the instant it clears validation, so the queue can
-          // start sentence one before the script is finished. The controller
-          // ignores every call after the first; passing the running list keeps
-          // the engine honest about what it knows so far.
-          onPartial?.({
-            mode: resolvedMode,
-            facts: factsNow(),
-            segments: segments.slice(),
-            // Decisive on the first sentence: a server that cannot speak this
-            // walk says so once, and the client starts on the browser voice.
-            remoteAudio: asString(frame.audio_url) !== undefined,
           });
           return;
         }
 
         if (frame.type === "reminder") {
           const url = asString(frame.audio_url);
-          const text = asString(frame.text);
-          if (url && text) {
-            reminder = { url, text };
+          const text = asString(frame.text) ?? asString(frame.content);
+          if (url && text) reminder = { url, text };
+          return;
+        }
+
+        if (frame.type === "indicator") {
+          const status = asString(frame.status);
+          resolvedMode = asMode(frame.mode) ?? resolvedMode;
+          if (status === "walk_complete" || frame.complete === true) {
+            walkComplete = true;
+            if (typeof frame.grace_ms === "number") graceMs = frame.grace_ms;
+            if (typeof frame.pad_ms === "number") padMs = frame.pad_ms;
+          }
+          if (status === "cycle_complete") {
+            if (typeof frame.pause_ms === "number") pauseMs = frame.pause_ms;
           }
           return;
         }
 
         if (frame.type === "done") {
           resolvedMode = asMode(frame.mode) ?? resolvedMode;
+          walkComplete = true;
         }
       };
 
@@ -466,14 +511,16 @@ function createRealEngine(): WalkEngine {
       return {
         mode: resolvedMode,
         facts: factsNow(),
-        segments,
+        segments: walkSegments.slice(),
         timings: {
           context: context?.ms ?? 0,
           walk: Math.round(performance.now() - walkStarted),
         },
-        // The server's reminder line, handed back so the controller can append
-        // it as the final spoken segment. The client holds no copy of the text.
         reminder: reminderText(),
+        complete: walkComplete,
+        pauseMs,
+        graceMs,
+        padMs,
       };
     },
 

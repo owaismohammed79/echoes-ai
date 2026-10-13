@@ -1,16 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { MouseMascot } from "@/components/echoes/mouse-mascot";
-import { Hairline, TechLabel } from "@/components/echoes/tech-label";
 import { cn } from "@/lib/utils";
 
 /**
  * The phone-in-pocket guard.
  *
  * The walk is meant to be listened to with the phone away (AGENTS.md section 3),
- * so the moment the walker brings the app back into view mid-walk the screen
- * gets a friendly intervention instead of the walk: a modal that names what they
- * are doing and asks them to pocket it again.
+ * but a walker who wakes the screen has every right to look at it. So the
+ * reminder is a slim, non-blocking banner (with the mascot) that appears for a
+ * couple of seconds on a genuine return and then leaves on its own. It never
+ * covers the walk UI and never intercepts a tap; the time spent looking is
+ * simply counted as screen-on time.
  *
  * Two things run the whole time the walk is live:
  *  - a screen-on clock, which counts only while the page is actually visible, so
@@ -20,8 +21,8 @@ import { cn } from "@/lib/utils";
  *    and a return has to be caught either way.
  */
 
-/** How long the walker has to pocket the phone before the reminder returns. */
-const RECHECK_MS = 3000;
+/** How long the banner stays up after the walker returns to the screen. */
+const BANNER_MS = 2000;
 
 /**
  * MM:SS, zero-padded. Exported because the summary prints the same figure it was
@@ -51,15 +52,15 @@ export function ScreenLockGuard({
   const [screenOnSeconds, setScreenOnSeconds] = useState(0);
   const [nudge, setNudge] = useState(false);
   // Set when the walker takes the app off-screen (blur/hide) and read when it
-  // comes back, so the reminder fires on a genuine return — never on first paint.
+  // comes back, so the banner fires on a genuine return — never on first paint.
   const awayRef = useRef(false);
-  // The snooze timer behind the "I'm putting it away now" button.
-  const recheckRef = useRef<number | null>(null);
+  // The auto-dismiss timer for the banner.
+  const hideRef = useRef<number | null>(null);
 
-  const clearRecheck = useCallback(() => {
-    if (recheckRef.current !== null) {
-      window.clearTimeout(recheckRef.current);
-      recheckRef.current = null;
+  const clearHide = useCallback(() => {
+    if (hideRef.current !== null) {
+      window.clearTimeout(hideRef.current);
+      hideRef.current = null;
     }
   }, []);
 
@@ -80,14 +81,14 @@ export function ScreenLockGuard({
     onScreenOnChange(screenOnSeconds);
   }, [screenOnSeconds, onScreenOnChange]);
 
-  // A fresh walk starts the clock, the reminder and the away-flag from zero.
+  // A fresh walk starts the clock, the banner and the away-flag from zero.
   useEffect(() => {
     if (!active) return;
     setScreenOnSeconds(0);
     setNudge(false);
     awayRef.current = false;
-    clearRecheck();
-  }, [active, clearRecheck]);
+    clearHide();
+  }, [active, clearHide]);
 
   // --- leaving and returning ---------------------------------------------
   useEffect(() => {
@@ -97,10 +98,16 @@ export function ScreenLockGuard({
       awayRef.current = true;
     };
     const markPresent = () => {
-      // Only a return — an away followed by a present — raises the reminder.
+      // Only a return — an away followed by a present — raises the banner.
       if (!awayRef.current) return;
       awayRef.current = false;
       setNudge(true);
+      // Restarts on every return, so a quick lock/unlock never cuts a banner short.
+      clearHide();
+      hideRef.current = window.setTimeout(() => {
+        hideRef.current = null;
+        setNudge(false);
+      }, BANNER_MS);
     };
     const onVisibility = () => {
       if (document.visibilityState === "visible") {
@@ -108,7 +115,7 @@ export function ScreenLockGuard({
       } else {
         markAway();
         setNudge(false);
-        clearRecheck();
+        clearHide();
       }
     };
     const onBlur = () => markAway();
@@ -121,69 +128,36 @@ export function ScreenLockGuard({
       document.removeEventListener("visibilitychange", onVisibility);
       window.removeEventListener("blur", onBlur);
       window.removeEventListener("focus", onFocus);
-      clearRecheck();
+      clearHide();
     };
-  }, [active, clearRecheck]);
-
-  // --- dismissal ----------------------------------------------------------
-  const dismiss = useCallback(() => {
-    setNudge(false);
-    clearRecheck();
-    // Not a dismissal, a snooze: pocket the phone and it stays away; keep
-    // looking at the screen and the reminder comes back.
-    recheckRef.current = window.setTimeout(() => {
-      recheckRef.current = null;
-      if (document.visibilityState === "visible") setNudge(true);
-    }, RECHECK_MS);
-  }, [clearRecheck]);
+  }, [active, clearHide]);
 
   if (!active || !nudge) return null;
 
   return (
+    // The wrapper is pointer-transparent: the banner informs, it never blocks a
+    // tap on the walk underneath. Safe-area aware so it clears the iOS notch.
     <div
-      role="alertdialog"
-      aria-modal="true"
-      aria-labelledby="screen-lock-message"
-      className="absolute inset-0 z-40 flex items-center justify-center bg-[#09090B]/85 px-5 backdrop-blur-sm"
+      className="pointer-events-none absolute inset-x-0 top-0 z-[60] flex justify-center px-4"
+      style={{ paddingTop: "calc(env(safe-area-inset-top, 0px) + 8px)" }}
     >
-      <div className="w-full max-w-[440px] border border-white/10 bg-[#101010] p-5 shadow-[0_0_60px_rgba(16,185,129,0.08)]">
-        <div className="flex items-center justify-between gap-3">
-          <TechLabel tone="accent">phone-in-pocket</TechLabel>
-          <span className="flex items-baseline gap-[8px] border border-white/10 bg-white/[0.03] px-[10px] py-[5px]">
-            <span className="font-mono text-[10px] tracking-[0.064em] text-white/40">
-              Screen-on time:
-            </span>
-            <span className="font-mono text-[11px] tabular-nums text-white/85">
-              {formatMMSS(screenOnSeconds)}
-            </span>
-          </span>
-        </div>
-
-        <Hairline className="my-[14px]" />
-
-        <div className="flex items-center gap-[18px]">
-          {/* The mascot watches the pointer, so it turns to face the hand that
-              just brought the phone to eye level. */}
-          <MouseMascot className="h-20 w-20" />
-          <p
-            id="screen-lock-message"
-            className="text-[15px] leading-[1.45] text-white/85"
-          >
-            Are you trying to look at your phone? 🦔 Put it back in your pocket
-            and let your ears do the walking!
-          </p>
-        </div>
-
-        <button
-          type="button"
-          onClick={dismiss}
-          className={cn(
-            "mt-[18px] h-[48px] w-full border border-[#10B981] font-mono text-[12px] uppercase tracking-[0.053em] text-[#10B981]",
-            "transition-colors hover:bg-[#10B981]/10"
-          )}
-        >
-          I&rsquo;m putting it away now
-        </button>
+      <div
+        role="status"
+        aria-live="polite"
+        className={cn(
+          "animate-in fade-in slide-in-from-top-2 duration-300",
+          "flex w-full max-w-[440px] items-center gap-[10px] border border-white/10 bg-[#101010]/95 py-[6px] pl-[6px] pr-[12px]",
+          "shadow-[0_0_40px_rgba(16,185,129,0.10)] backdrop-blur-sm"
+        )}
+      >
+        {/* Small, and still watching the pointer on desktop. */}
+        <MouseMascot className="h-10 w-10" />
+        <p className="min-w-0 flex-1 text-[12px] leading-[1.35] text-white/85">
+          Phone back in your pocket? 🦔 This time counts as screen time.
+        </p>
+        <span className="shrink-0 font-mono text-[11px] tabular-nums text-[#10B981]">
+          {formatMMSS(screenOnSeconds)}
+        </span>
       </div>
     </div>
   );

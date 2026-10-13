@@ -26,6 +26,13 @@ import {
 import { LlmTemporaryOutageError } from "@/lib/real-engine";
 import { useContinuousVad } from "@/hooks/use-continuous-vad";
 import { getAudioContext } from "@/lib/audio-context";
+import {
+  AMBIENT_PAUSE_MS,
+  QA_GRACE_MS,
+  makeAmbientBed,
+  shouldResumeOnVisible,
+} from "@/lib/audio-lifecycle";
+import { ClipSequencer } from "@/lib/clip-sequencer";
 
 export interface WalkController {
   phase: Phase;
@@ -99,6 +106,15 @@ const REVEAL_FALLBACK_WPS = 2.4;
 const SEGMENT_PREFIX = "segment:";
 const ANSWER_ID = "answer";
 const TRANSITION_ID = "transition";
+const PAUSE_ID = "pause";
+const GRACE_ID = "grace";
+/** Silence that makes a final cycle that came in short end on the chosen duration. */
+const PAD_ID = "pad";
+/** A failed continuation is retried after a short gap, this many times, then the walk ends. */
+const MAX_CONTINUE_RETRIES = 2;
+const RETRY_PAUSE_MS = 20_000;
+
+type AmbientKind = "pause" | "grace" | "pad";
 
 /** Words in `text`: the denominator for the reveal. */
 function countWords(text: string): number {
@@ -180,6 +196,18 @@ export function useWalkController(engine: WalkEngine): WalkController {
   const queueNextRef = useRef(0);
   /** Clips in flight, so the queue is never pumped past QUEUE_DEPTH. */
   const pendingRef = useRef(0);
+  /**
+   * Holds a fetched clip back until every clip before it has arrived, so the
+   * voice speaks sentences in the order the transcript shows them.
+   */
+  const sequencerRef = useRef(new ClipSequencer<Blob>());
+  /**
+   * True once this walk is spoken by the browser voice (the server said
+   * `use_native_tts`, or the remote voice failed). Sticky for the whole walk:
+   * the remote queue must never be driven again, or it would restart speech
+   * from a stale index on every cycle.
+   */
+  const nativeModeRef = useRef(false);
   /** The queue emptied before the next clip arrived; restart it on arrival. */
   const starvedRef = useRef(false);
   /** The bridge line currently on the transport, for the reveal. */
@@ -226,7 +254,36 @@ export function useWalkController(engine: WalkEngine): WalkController {
     stop: () => {},
   });
   /** Escape hatch back to the browser voice, kept fresh for the queue's handlers. */
-  const nativeFallbackRef = useRef<(reason: string) => void>(() => {});
+  const nativeFallbackRef = useRef<(reason: string, at?: number) => void>(
+    () => {}
+  );
+  /** The server closed this cycle; play ambient then fetch the next. */
+  const cyclePauseRef = useRef(false);
+  /** The server said the walk is over. */
+  const walkCompleteRef = useRef(false);
+  const pauseMsRef = useRef(AMBIENT_PAUSE_MS);
+  const graceMsRef = useRef(QA_GRACE_MS);
+  const fetchingCycleRef = useRef(false);
+  const continueCycleRef = useRef<() => void>(() => {});
+  const playAmbientRef = useRef<(kind: AmbientKind, ms?: number) => void>(
+    () => {}
+  );
+  /** The ambient bed on the transport, so a question asked over it can restore it. */
+  const ambientRef = useRef<{
+    kind: AmbientKind;
+    startedAt: number;
+    ms: number;
+  } | null>(null);
+  /** What follows the last buffered sentence: the gap, the pad, the Q&A window, or the end. */
+  const finishCycleRef = useRef<() => void>(() => {});
+  /** The script is complete: start whatever should follow, if nothing is playing. */
+  const settleCycleRef = useRef<(from: number, started: boolean) => void>(
+    () => {}
+  );
+  const padMsRef = useRef(0);
+  const retriesRef = useRef(0);
+  const stopMicRef = useRef<() => void>(() => {});
+  const lastFixRef = useRef<Fix | null>(null);
 
   useEffect(() => {
     mounted.current = true;
@@ -371,6 +428,8 @@ export function useWalkController(engine: WalkEngine): WalkController {
    */
   const fillQueue = useCallback(
     (queue: AudioQueue) => {
+      // A walk on the browser voice has no clips to fetch.
+      if (nativeModeRef.current) return;
       const list = segmentsRef.current;
       const fetchAudio = engine.audio;
       if (!fetchAudio) {
@@ -379,11 +438,25 @@ export function useWalkController(engine: WalkEngine): WalkController {
         return;
       }
       const gen = fillGenRef.current;
+      const sequencer = sequencerRef.current;
       const buffered = () =>
-        queue.depth + (queue.busy ? 1 : 0) + pendingRef.current;
+        queue.depth +
+        (queue.busy ? 1 : 0) +
+        pendingRef.current +
+        sequencer.waiting;
+      const enqueueReleased = (released: { index: number; clip: Blob }[]) => {
+        for (const { index, clip } of released) {
+          queue.enqueue({ id: `${SEGMENT_PREFIX}${index}`, blob: clip });
+        }
+      };
 
       while (buffered() < QUEUE_DEPTH && queueNextRef.current < list.length) {
         const at = queueNextRef.current++;
+        if (!list[at]?.text) {
+          // An empty slot still holds its place in the order.
+          enqueueReleased(sequencer.put(at, null));
+          continue;
+        }
         pendingRef.current += 1;
         void fetchAudio(list[at].text, at)
           .then((blob) => {
@@ -391,19 +464,20 @@ export function useWalkController(engine: WalkEngine): WalkController {
             // to a walk state that no longer exists.
             if (!mounted.current || gen !== fillGenRef.current) return;
             if (!blob) {
-              nativeFallbackRef.current("tts_unconfigured");
+              nativeFallbackRef.current("tts_unconfigured", at);
               return;
             }
-            queue.enqueue({ id: `${SEGMENT_PREFIX}${at}`, blob });
+            // Released in sentence order, not arrival order.
+            enqueueReleased(sequencer.put(at, blob));
             // The speaker ran dry while this was in flight: start it again.
-            if (starvedRef.current) {
+            if (starvedRef.current && queue.depth > 0) {
               starvedRef.current = false;
               queue.play();
             }
           })
           .catch(() => {
             if (mounted.current && gen === fillGenRef.current) {
-              nativeFallbackRef.current("tts_provider_error");
+              nativeFallbackRef.current("tts_provider_error", at);
             }
           })
           .finally(() => {
@@ -425,6 +499,11 @@ export function useWalkController(engine: WalkEngine): WalkController {
     const handlers: QueueHandlers = {
       onStart: (id) => {
         if (!mounted.current) return;
+
+        if (id === PAUSE_ID || id === GRACE_ID || id === PAD_ID) {
+          setActivity("ready");
+          return;
+        }
 
         if (id === ANSWER_ID || id === TRANSITION_ID) {
           // An answer and the bridge that follows it are not steps of the walk:
@@ -463,15 +542,32 @@ export function useWalkController(engine: WalkEngine): WalkController {
           resumeRef.current();
           return;
         }
-
-        // The last sentence ending *is* the walk ending — a deterministic
-        // signal, unlike an empty queue, which is usually just waiting. Only
-        // once the script is complete, though: a walk that ends when the
-        // sentences *so far* run out would hide everything still being written.
-        const at = Number(id.slice(SEGMENT_PREFIX.length));
-        if (scriptCompleteRef.current && at >= segmentsRef.current.length - 1) {
+        if (id === PAUSE_ID) {
+          ambientRef.current = null;
+          continueCycleRef.current();
+          return;
+        }
+        if (id === PAD_ID) {
+          ambientRef.current = null;
+          playAmbientRef.current("grace");
+          return;
+        }
+        if (id === GRACE_ID) {
+          ambientRef.current = null;
+          stopMicRef.current();
           setActivity("ready");
           setCompleted(true);
+          return;
+        }
+
+        // The last sentence of a cycle is either "play the ambient bed, then
+        // ask the server for the next chunk" or "the walk is over, start the
+        // Q&A grace window". The server owns that distinction.
+        const at = Number(id.slice(SEGMENT_PREFIX.length));
+        const last =
+          scriptCompleteRef.current && at >= segmentsRef.current.length - 1;
+        if (last) {
+          finishCycleRef.current();
           return;
         }
         fillQueue(queue);
@@ -486,7 +582,9 @@ export function useWalkController(engine: WalkEngine): WalkController {
         starvedRef.current = true;
       },
       onError: () => {
-        if (mounted.current) nativeFallbackRef.current("tts_provider_error");
+        if (mounted.current) {
+          nativeFallbackRef.current("tts_provider_error", indexRef.current);
+        }
       },
     };
 
@@ -498,15 +596,20 @@ export function useWalkController(engine: WalkEngine): WalkController {
     (startIndex: number, path: VoicePath, attempt = 0) => {
       const list = segmentsRef.current;
       if (!mounted.current) return;
+      // Once the walk is on the browser voice it stays there.
+      if (nativeModeRef.current && path === "remote") path = "native";
       // Whatever was in flight for the previous playback is void now.
       fillGenRef.current += 1;
       if (startIndex >= list.length) {
-        // Hold the transcript on the last thing actually said, and mark the
-        // walk done — rewinding to segment 01 would read as if it had restarted.
+        // Hold the transcript on the last thing actually said. The server, not
+        // this branch, decides whether that is a pause or the end of the walk.
         indexRef.current = Math.max(0, list.length - 1);
         setIndex(indexRef.current);
-        setActivity("ready");
-        setCompleted(true);
+        if (!scriptCompleteRef.current) {
+          setActivity("ready");
+          return;
+        }
+        finishCycleRef.current();
         return;
       }
       if (path === "remote" && attempt === 0 && engine.audio) {
@@ -515,6 +618,7 @@ export function useWalkController(engine: WalkEngine): WalkController {
         const queue = ensureQueue();
         queue.clear();
         queueNextRef.current = startIndex;
+        sequencerRef.current.reset(startIndex);
         pendingRef.current = 0;
         starvedRef.current = false;
         indexRef.current = startIndex;
@@ -590,13 +694,17 @@ export function useWalkController(engine: WalkEngine): WalkController {
   // Refreshed every render: the queue's handlers outlive any single one of them,
   // and they must always reach the walk's *current* position and callbacks.
   useEffect(() => {
-    nativeFallbackRef.current = (reason: string) => {
+    nativeFallbackRef.current = (reason: string, at?: number) => {
+      nativeModeRef.current = true;
       queueRef.current?.clear();
       if (!mounted.current) return;
       setFallback(reason);
       // Re-speak the sentence that failed, and everything after it, through the
-      // browser voice: the on-screen form of `use_native_tts: true`.
-      playFrom(indexRef.current, "native", 1);
+      // browser voice: the on-screen form of `use_native_tts: true`. ``at`` is
+      // the sentence that failed. The last one *heard* (``indexRef``) is only
+      // right when that is the same sentence, and on a continuation cycle it is
+      // the previous cycle's last line -- which would be spoken twice.
+      playFrom(at ?? indexRef.current, "native", 1);
     };
 
     // The transition has played (or there was none): put the narration back.
@@ -609,14 +717,183 @@ export function useWalkController(engine: WalkEngine): WalkController {
         setActivity("ready");
         return;
       }
+      // A question asked over an ambient gap resumes the gap, with what was
+      // left of it: replaying the previous sentence would be a repeat.
+      const ambient = ambientRef.current;
+      if (ambient) {
+        const left = ambient.ms - (Date.now() - ambient.startedAt);
+        playAmbientRef.current(ambient.kind, Math.max(5_000, left));
+        return;
+      }
+      if (walkCompleteRef.current) {
+        playAmbientRef.current("grace");
+        return;
+      }
       // Back on the road, in whatever voice is currently working.
       playFrom(indexRef.current, fallback ? "native" : voicePath);
     };
 
     // The answer has finished: bridge back into the walk.
     answerDoneRef.current = () => {
-      if (mounted.current) void bridgeAndResume();
+      if (!mounted.current) return;
+      if (walkCompleteRef.current) {
+        playAmbientRef.current("grace");
+        return;
+      }
+      void bridgeAndResume();
     };
+
+    playAmbientRef.current = (kind, msOverride) => {
+      if (!mounted.current) return;
+      const queue = ensureQueue();
+      const ms =
+        msOverride ??
+        (kind === "grace"
+          ? graceMsRef.current
+          : kind === "pad"
+            ? padMsRef.current
+            : pauseMsRef.current);
+      ambientRef.current = { kind, startedAt: Date.now(), ms };
+      queue.enqueue({
+        id: kind === "grace" ? GRACE_ID : kind === "pad" ? PAD_ID : PAUSE_ID,
+        blob: makeAmbientBed(ms),
+      });
+      setActivity("ready");
+      queue.play();
+    };
+
+    // What follows the last sentence of a cycle. The server decided which: the
+    // walk is over (pad if it ended short, then the Q&A window), or there is a
+    // gap and then another cycle.
+    finishCycleRef.current = () => {
+      if (!mounted.current) return;
+      if (walkCompleteRef.current) {
+        playAmbientRef.current(padMsRef.current > 0 ? "pad" : "grace");
+        return;
+      }
+      if (cyclePauseRef.current) {
+        playAmbientRef.current("pause");
+        return;
+      }
+      setActivity("ready");
+      setCompleted(true);
+    };
+
+    // The whole script for this cycle has arrived. If everything buffered has
+    // already been spoken the end-of-clip handlers will never fire again, so
+    // whatever comes next has to be started from here.
+    settleCycleRef.current = (from, started) => {
+      if (!mounted.current || pausedRef.current) return;
+      if (nativeModeRef.current) {
+        if (activityRef.current === "ready") {
+          playFrom(started ? indexRef.current + 1 : from, "native");
+        }
+        return;
+      }
+      const queue = ensureQueue();
+      fillQueue(queue);
+      const idle =
+        !queue.busy &&
+        queue.depth === 0 &&
+        pendingRef.current === 0 &&
+        sequencerRef.current.waiting === 0 &&
+        queueNextRef.current >= segmentsRef.current.length;
+      if (idle) finishCycleRef.current();
+    };
+
+    continueCycleRef.current = () => {
+      if (!mounted.current || fetchingCycleRef.current || walkCompleteRef.current) {
+        return;
+      }
+      fetchingCycleRef.current = true;
+      const run = runIdRef.current;
+      void (async () => {
+        const located = (await requestFix()) ?? lastFixRef.current;
+        if (!mounted.current || run !== runIdRef.current) {
+          fetchingCycleRef.current = false;
+          return;
+        }
+        if (!located) {
+          fetchingCycleRef.current = false;
+          walkCompleteRef.current = true;
+          playAmbientRef.current("grace");
+          return;
+        }
+        lastFixRef.current = located;
+        setFix(located);
+
+        // A new cycle starts here. Its script is still arriving, so the end of
+        // what is buffered means "more is coming", not "the cycle is over" --
+        // the flags left over from the previous cycle would say otherwise.
+        const from = segmentsRef.current.length;
+        scriptCompleteRef.current = false;
+        cyclePauseRef.current = false;
+        fillGenRef.current += 1;
+        pendingRef.current = 0;
+        queueNextRef.current = from;
+        sequencerRef.current.reset(from);
+        starvedRef.current = true;
+        let started = false;
+
+        try {
+          const narration = await engine.narrate({
+            mode,
+            fix: located,
+            prefs: lastPrefsRef.current,
+            continuation: true,
+            onPartial: (partial) => {
+              if (!mounted.current || run !== runIdRef.current) return;
+              segmentsRef.current = partial.segments;
+              setSegments(partial.segments);
+              setFacts(partial.facts);
+              if (partial.remoteAudio === false) nativeModeRef.current = true;
+              if (partial.segments.length <= from) return;
+              if (nativeModeRef.current) {
+                // Speak the cycle's first sentence now; the rest follow as the
+                // end of each one asks for the next.
+                if (!started) {
+                  started = true;
+                  playFrom(from, "native");
+                }
+                return;
+              }
+              started = true;
+              fillQueue(ensureQueue());
+            },
+          });
+          if (!mounted.current || run !== runIdRef.current) return;
+          segmentsRef.current = narration.segments;
+          setSegments(narration.segments);
+          setFacts(narration.facts);
+          walkCompleteRef.current = narration.complete === true;
+          cyclePauseRef.current = narration.complete !== true;
+          if (narration.pauseMs) pauseMsRef.current = narration.pauseMs;
+          if (narration.graceMs) graceMsRef.current = narration.graceMs;
+          padMsRef.current = narration.padMs ?? 0;
+          retriesRef.current = 0;
+          scriptCompleteRef.current = true;
+        } catch {
+          if (!mounted.current || run !== runIdRef.current) return;
+          scriptCompleteRef.current = true;
+          retriesRef.current += 1;
+          if (retriesRef.current > MAX_CONTINUE_RETRIES) {
+            // The server is not coming back: end the walk properly rather than
+            // leaving the walker in silence.
+            walkCompleteRef.current = true;
+            padMsRef.current = 0;
+          } else {
+            // A hiccup, not the end: another short gap, then ask again.
+            cyclePauseRef.current = true;
+            pauseMsRef.current = RETRY_PAUSE_MS;
+          }
+        } finally {
+          fetchingCycleRef.current = false;
+        }
+        if (!mounted.current || run !== runIdRef.current) return;
+        settleCycleRef.current(from, started);
+      })();
+    };
+
   });
 
   /** Ask for a fix, once, after the tap. Rounded to 3dp and never stored. */
@@ -834,6 +1111,10 @@ export function useWalkController(engine: WalkEngine): WalkController {
     playingRef
   );
 
+  useEffect(() => {
+    stopMicRef.current = () => vad.stop();
+  });
+
   const start = useCallback((prefs?: WalkPrefs) => {
     // Synchronous, before the geolocation prompt and before /api/walk: this is
     // the gesture that buys the right to play on iOS.
@@ -846,6 +1127,13 @@ export function useWalkController(engine: WalkEngine): WalkController {
     // speak into this one.
     runIdRef.current += 1;
     lastPrefsRef.current = prefs;
+    // A fresh walk starts with a clean playback state. It speaks through the
+    // browser voice from the outset only when the engine has no audio at all.
+    nativeModeRef.current = !engine.audio;
+    sequencerRef.current.reset(0);
+    ambientRef.current = null;
+    padMsRef.current = 0;
+    retriesRef.current = 0;
     setPhase("arming");
     setDrawer(false);
     setScreenOnSeconds(0);
@@ -876,7 +1164,11 @@ export function useWalkController(engine: WalkEngine): WalkController {
         return;
       }
       setFix(located);
+      lastFixRef.current = located;
       scriptCompleteRef.current = false;
+      walkCompleteRef.current = false;
+      cyclePauseRef.current = false;
+      fetchingCycleRef.current = false;
 
       // Set the first time there are sentences to speak, which for a streaming
       // backend is well before the script is finished.
@@ -893,9 +1185,17 @@ export function useWalkController(engine: WalkEngine): WalkController {
         // shift every sentence that arrives after it, and the queue's
         // forward-only cursor would then skip them. The text comes from the
         // backend, never a hardcoded client copy.
+        const alreadyHasReminder = narrationSegments.some(
+          (segment) =>
+            segment.role === "reminder" ||
+            (reminderText ? segment.text === reminderText : false)
+        );
         const list =
-          scriptCompleteRef.current && reminderText
-            ? [...narrationSegments, { text: reminderText, citation: null }]
+          scriptCompleteRef.current && reminderText && !alreadyHasReminder
+            ? [
+                ...narrationSegments,
+                { text: reminderText, citation: null, role: "reminder" as const },
+              ]
             : [...narrationSegments];
         live = true;
         setMode(narrationMode);
@@ -933,6 +1233,7 @@ export function useWalkController(engine: WalkEngine): WalkController {
             const path: VoicePath =
               partial.remoteAudio === false ? "native" : voicePath;
             if (path !== voicePath) setVoicePath(path);
+            if (path === "native") nativeModeRef.current = true;
             goLive(partial.facts, partial.segments, partial.mode, path);
           },
         })
@@ -951,19 +1252,38 @@ export function useWalkController(engine: WalkEngine): WalkController {
 
       setTimings(narration.timings);
       setMode(narration.mode);
+      walkCompleteRef.current = narration.complete === true;
+      cyclePauseRef.current = narration.complete !== true;
+      if (narration.pauseMs) pauseMsRef.current = narration.pauseMs;
+      if (narration.graceMs) graceMsRef.current = narration.graceMs;
+      padMsRef.current = narration.padMs ?? 0;
       if (live) {
         // The rest of the script arrived while the first sentences were already
         // being spoken. The transcript gains the sentences still to come, and
         // the queue is refilled because it may have run dry waiting for them.
-        const list = narration.reminder
-          ? [...narration.segments, { text: narration.reminder, citation: null }]
-          : [...narration.segments];
+        const alreadyHasReminder = narration.segments.some(
+          (segment) =>
+            segment.role === "reminder" ||
+            (narration.reminder ? segment.text === narration.reminder : false)
+        );
+        const list =
+          narration.reminder && !alreadyHasReminder
+            ? [
+                ...narration.segments,
+                {
+                  text: narration.reminder,
+                  citation: null,
+                  role: "reminder" as const,
+                },
+              ]
+            : [...narration.segments];
         segmentsRef.current = list;
         setSegments(list);
         setFacts(narration.facts);
         scriptCompleteRef.current = true;
-        const queue = queueRef.current;
-        if (queue) fillQueue(queue);
+        // The rest of the script is in. If everything buffered has already been
+        // spoken, nothing else will fire, so start what follows from here.
+        settleCycleRef.current(0, true);
         return;
       }
 
@@ -976,7 +1296,7 @@ export function useWalkController(engine: WalkEngine): WalkController {
         narration.reminder
       );
     })();
-  }, [engine, fillQueue, mode, playFrom, requestFix, voicePath]);
+  }, [engine, fallback, fillQueue, mode, playFrom, requestFix, voicePath]);
 
   /** Close the outage modal; the walker chose not to retry. */
   const dismissOutage = useCallback(() => setOutage(null), []);
@@ -1017,6 +1337,26 @@ export function useWalkController(engine: WalkEngine): WalkController {
     completedRef.current = completed;
   }, [completed]);
 
+  useEffect(() => {
+    if (phase !== "live") return;
+    const onVisible = () => {
+      const el = queueRef.current?.element_ ?? null;
+      if (
+        !shouldResumeOnVisible({
+          visibilityState: document.visibilityState,
+          walkActive: true,
+          userPaused: pausedRef.current,
+          elementPaused: el?.paused ?? false,
+        })
+      ) {
+        return;
+      }
+      queueRef.current?.resumeIfPaused();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [phase]);
+
   const togglePause = useCallback(() => {
     if (phase !== "live") return;
     if (activity === "speaking") {
@@ -1045,6 +1385,14 @@ export function useWalkController(engine: WalkEngine): WalkController {
     runIdRef.current += 1;
     scriptCompleteRef.current = false;
     completedRef.current = false;
+    walkCompleteRef.current = false;
+    cyclePauseRef.current = false;
+    fetchingCycleRef.current = false;
+    ambientRef.current = null;
+    nativeModeRef.current = false;
+    padMsRef.current = 0;
+    retriesRef.current = 0;
+    sequencerRef.current.reset(0);
     queueRef.current?.clear();
     // The microphone goes with the walk: a hands-free loop that keeps listening
     // after the walk ends is a hot mic.

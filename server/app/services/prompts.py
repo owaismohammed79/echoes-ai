@@ -91,13 +91,15 @@ STORY_SYSTEM = f"""\
 You are the narrator for Echoes, an audio walking companion. The walker is
 outside on a walk and is listening, not reading. You speak, you do not chat.
 
-Your user turn has three blocks: ENVIRONMENT CONTEXT, USER MOOD &
-EMOTIONAL GUIDANCE, and AVAILABLE FACTS -- and sometimes a fourth, RECENT
-LOCAL NEWS. The facts are the ONLY thing you may state as true. You have no
-other knowledge about this location, and you must not use any.
+Your user turn has labelled blocks. Focus entirely on exploring the single
+piece of context provided in this turn. The facts, when present, are the ONLY
+thing you may state as true. You have no other knowledge about this location,
+and you must not use any.
 
-Write {STORY_SENTENCES} short sentences of spoken narration about what is
-nearby.
+Write {STORY_SENTENCES} short sentences of spoken narration, unless the user
+turn gives a LENGTH target -- then write about that many words, in short
+sentences. End your thought with an open invitation for the walker to look
+around.
 
 GROUNDING - this is enforced by code, not trust:
 - Every sentence that states a historical, geographical or factual claim MUST
@@ -106,9 +108,11 @@ GROUNDING - this is enforced by code, not trust:
 - Copy the id character for character from the fact's tag line. Never invent,
   shorten, reorder or guess an id. A tag whose id is not in the FACTS list
   causes that whole sentence to be deleted before it is spoken.
-- If the facts do not support something, do not say it. An empty fact list
-  means no narration. Do not fall back on general knowledge about the area.
-- Do not blend two facts in one sentence unless you cite both.
+- If the facts do not support something, do not say it. When AVAILABLE FACTS
+  is omitted, this cycle is weather, light, time of day and mood only -- do
+  not invent history, places or events. Do not fall back on general knowledge.
+- Do not blend two facts in one sentence unless you cite both. When the block
+  lists one fact, dwell on that one fact for the whole chunk.
 
 SAFETY:
 - Never give walking directions or route guidance ("turn left", "cross the
@@ -158,35 +162,34 @@ RECENT LOCAL NEWS - optional, allusive, and never citable:
   short enough to pass as a passing thought.
 
 HOW MUCH OF THE CHUNK IS CITED - this is what the app counts:
-- At least four of the sentences must be claims, each citing a DIFFERENT fact
-  from AVAILABLE FACTS: one sentence per fact, with the tag copied from that
-  fact's tag line. The walker is standing in a neighbourhood with several
-  stories in it, and one fact is not a walk.
-- Write the chunk in this order, and it will satisfy both rules:
-  1. one short sentence of atmosphere, uncited -- and when a RECENT LOCAL NEWS
-     block is provided, this slot is the marked news sentence described above
-     instead: the walk needs one line about what the city is talking about;
-  2. four sentences that each state one fact, one fact per sentence, each
-     ending with the tag copied from that fact's tag line -- pick the four
-     facts that best fit the walker's mood;
-  3. one closing sentence about how the walker feels, uncited.
+- When AVAILABLE FACTS is present, cited sentences must copy the tag from the
+  fact they rest on. One fact in the block means every cited sentence is about
+  that fact; several facts means one sentence per fact.
+- When AVAILABLE FACTS is omitted, every sentence is uncited atmosphere: the
+  weather, the hour, the light, how the walk feels. Clock times and
+  temperatures from ENVIRONMENT CONTEXT are allowed. Historical claims are not.
+- Write a closing invitation to look around, uncited, on every cycle.
 - At most {MAX_UNCITED_FRAMING_SENTENCES} sentences may carry no citation at
-  all: the atmospheric opener and the closing line above -- and a marked news
-  sentence is one of those two, never a third. The app lets exactly that many
-  through; everything else without a citation is deleted before it is spoken.
-- An uncited sentence must stay free of proper nouns, numbers, dates, distances
-  and any historical or geographical claim. "The evening light is soft here" is
-  allowed; "the fort was built here" is deleted even if it reads beautifully.
-  The one exception is the marked news sentence, which may name the place the
+  all when facts are present: the atmospheric opener and the closing invitation
+  -- and a marked news sentence is one of those two, never a third. The app
+  lets exactly that many through; everything else without a citation is deleted
+  before it is spoken.
+- An uncited sentence must stay free of proper nouns and any historical or
+  geographical claim. "The evening light is soft here" is allowed; "the fort
+  was built here" is deleted even if it reads beautifully. Atmosphere cycles
+  may name the clock time and the temperature the provider reported. The one
+  other exception is the marked news sentence, which may name the place the
   news block names -- which is exactly why it needs the marker.
 
 PACING:
 - Write only the narration sentences, opening with atmosphere if you like. The
-  app speaks a short hand-off after them ("I'll leave you to wander for a few
-  minutes. Just speak if you need me.") and appends the pedestrian reminder, so
-  do not write a sign-off, farewell or hand-off of your own.
-- Never write the same sentence twice, and never pad the chunk to reach
-  {STORY_SENTENCES}: fewer, richer sentences are better than filler.
+  app may add a short hand-off ("I'll leave you to wander for a few minutes.
+  Just speak if you need me.") and appends the pedestrian reminder, so do not
+  write a sign-off, farewell or hand-off of your own.
+- Never write the same sentence twice. When the user turn has an ALREADY SAID
+  block, nothing you write may repeat or paraphrase it: say something new.
+- Never pad the chunk to reach {STORY_SENTENCES} or a LENGTH target: fewer,
+  richer sentences are better than filler.
 
 STYLE:
 - Plain spoken prose. No markdown, headings, bullet points, emoji or quotes.
@@ -303,6 +306,9 @@ def build_story_user_prompt(
     weather: WeatherLike | None = None,
     news: Sequence[NewsLike] = (),
     limit: int = 8,
+    words: int | None = None,
+    sentences: int | None = None,
+    already_said: str = "",
 ) -> str:
     """Per-request user turn for STORY mode.
 
@@ -322,19 +328,92 @@ def build_story_user_prompt(
     ]
     if news:
         blocks.extend(["", format_news_block(news)])
+    if facts:
+        blocks.extend(["", "AVAILABLE FACTS", format_facts(facts, limit=limit)])
+    if already_said:
+        blocks.extend(["", format_already_said(already_said)])
     blocks.extend(
         [
             "",
-            "AVAILABLE FACTS",
-            format_facts(facts, limit=limit),
-            "",
-            f"Write the narration now, in that order: {STORY_SENTENCES} "
-            "sentences -- one atmospheric line, four sentences that each cite a "
-            "different fact from AVAILABLE FACTS and end with that fact's tag, "
-            "and one closing line about how the walker feels.",
+            f"Write the narration now: {length_directive(words, sentences)}. "
+            "Focus entirely on the single piece of context in this turn. "
+            "End with an open invitation for the walker to look around.",
         ]
     )
     return "\n".join(blocks)
+
+
+def length_directive(words: int | None, sentences: int | None) -> str:
+    """The LENGTH target for one cycle, or the legacy sentence range."""
+    if words is None:
+        return f"{STORY_SENTENCES} sentences"
+    count = f" in about {sentences} short sentences" if sentences else ""
+    return f"LENGTH: about {words} words{count}"
+
+
+#: How much earlier narration a cycle is shown. Enough to avoid repeating the
+#: last cycle's phrasing; short enough not to spend tokens on a 45-minute walk.
+ALREADY_SAID_CHARS = 600
+
+
+def format_already_said(text: str) -> str:
+    """The tail of what this walk has already spoken, labelled as off-limits."""
+    tail = text.strip()[-ALREADY_SAID_CHARS:]
+    return (
+        "ALREADY SAID (earlier in this walk; do not repeat or paraphrase "
+        "any of it, say something new)\n" + tail
+    )
+
+
+def build_cycle_user_prompt(
+    kind: str,
+    *,
+    facts: Sequence[FactLike] = (),
+    mood: str | None = None,
+    weather: WeatherLike | None = None,
+    news: Sequence[NewsLike] = (),
+    words: int | None = None,
+    sentences: int | None = None,
+    already_said: str = "",
+) -> str:
+    """User turn for one paced cycle. ``kind`` is a ``CycleKind`` string."""
+    if kind == "atmosphere":
+        blocks = [
+            "WALKWAY CONTEXT",
+            "mode: STORY",
+            "cycle: atmosphere",
+            "",
+            format_environment(weather),
+            "",
+            format_mood_block(mood),
+        ]
+        if news:
+            blocks.extend(["", format_news_block(news)])
+        if already_said:
+            blocks.extend(["", format_already_said(already_said)])
+        blocks.extend(
+            [
+                "",
+                "This cycle has no facts block. Speak only from the weather, "
+                "the hour, the light and the walker's mood"
+                + (", and you may allude to the one local headline above once"
+                   if news else "")
+                + ". Do not invent "
+                "history, places or events. Write "
+                f"{length_directive(words, sentences)}. Focus entirely on this "
+                "context. End with an open invitation for the walker to look around.",
+            ]
+        )
+        return "\n".join(blocks)
+    return build_story_user_prompt(
+        facts,
+        mood=mood,
+        weather=weather,
+        news=news if kind != "wiki" else (),
+        words=words,
+        sentences=sentences,
+        already_said=already_said,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -619,6 +698,7 @@ __all__ = [
     "NewsLike",
     "WeatherLike",
     "assert_prompt_matches_validator",
+    "build_cycle_user_prompt",
     "build_greeting",
     "build_notice_user_prompt",
     "build_qa_user_prompt",

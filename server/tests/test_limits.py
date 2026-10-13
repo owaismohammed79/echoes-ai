@@ -229,7 +229,8 @@ def test_exhausting_the_cap_serves_the_demo_without_calling_anyone() -> None:
     assert resp.status_code == 200
     assert resp.headers[DEMO_HEADER] == "True"
     assert resp.headers["x-demo-reason"] == "spend_cap"
-    assert [f["type"] for f in frames][-1] == "done"
+    assert [f["type"] for f in frames][-1] == "indicator"
+    assert frames[-1]["status"] == "walk_complete"
     assert all(f.get("demo") is True for f in frames)
     # The whole point: no ElevenLabs, no model.
     assert tts.spoken == []
@@ -248,7 +249,9 @@ def test_the_demo_is_labelled_and_its_citations_resolve() -> None:
         frames = ndjson(_post_walk(client, ip=CLIENT_IP))
 
     assert all(f.get("demo") is True for f in frames)
-    sentences = [f for f in frames if f["type"] == "sentence"]
+    sentences = [
+        f for f in frames if f["type"] in {"text", "sentence"} and f.get("role") != "reminder"
+    ]
     assert len(sentences) == len(DEMO_SEGMENTS)
 
     fact_ids = {f.fact_id for f in DEMO_FACTS}

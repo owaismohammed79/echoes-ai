@@ -136,7 +136,9 @@ _DIGIT = re.compile(r"\d")
 
 #: Capitalised words a framing sentence may contain after its first word. First
 #: person is not a proper noun, and spoken prose opens with it constantly.
-_PROPER_NOUN_ALLOWED = frozenset({"I", "I'm", "I've", "I'll", "I'd"})
+_PROPER_NOUN_ALLOWED = frozenset(
+    {"I", "I'm", "I've", "I'll", "I'd", "AM", "PM"}
+)
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +176,25 @@ def _has_proper_noun(text: str) -> bool:
         if index and word[0].isupper() and word not in _PROPER_NOUN_ALLOWED:
             return True
     return False
+
+
+def _is_atmosphere_sentence(text: str) -> bool:
+    """Whether an uncited sentence is weather, mood or time-of-day.
+
+    Atmosphere cycles have no FactObject to cite, but they *are* grounded: the
+    weather provider, the walker's clock, and the mood they chose. Digits are
+    allowed so "6:42 PM" and "9°C" survive. Historical or geographical claims
+    are still rejected -- those belong to a wiki/park cycle with a citation.
+    """
+    if FACTUAL_CLAIM.search(text):
+        return False
+    if _has_proper_noun(text):
+        return False
+    return bool(
+        FRAMING_MARKERS.search(text)
+        or WEATHER_PREDICATES.search(text)
+        or INVITATION_MARKERS.search(text)
+    )
 
 
 def _is_framing_sentence(text: str) -> bool:
@@ -229,6 +250,7 @@ def validate_story_sentence(
     valid_fact_ids: Mapping[str, str] | Iterable[str],
     allow_uncited_framing: bool = False,
     allow_news_reference: bool = False,
+    allow_atmosphere: bool = False,
 ) -> ValidatedSentence:
     """Validate one STORY sentence. Raises ``SentenceRejected`` if unspeakable.
 
@@ -251,6 +273,11 @@ def validate_story_sentence(
     uncited sentence of a chunk. A marked sentence with no allowance left is
     rejected as ``NEWS_OVERFLOW`` -- the rejection that says the tag was
     understood and the budget was the problem.
+
+    ``allow_atmosphere`` is the weather/mood/time cycle: uncited sentences that
+    name the sky, the hour or the feeling are admitted even when they carry a
+    clock time or a temperature. Wiki and SerpApi claims still need a citation;
+    this flag does not waive :data:`FACTUAL_CLAIM`.
     """
     id_to_url = _resolve_sources(valid_fact_ids)
 
@@ -269,6 +296,9 @@ def validate_story_sentence(
             spoken = strip_citation_tags(text)
             _check_safety_denylists(spoken, sentence)
             return ValidatedSentence(text=spoken, news=True)
+        if allow_atmosphere and _is_atmosphere_sentence(text):
+            _check_safety_denylists(text, sentence)
+            return ValidatedSentence(text=text)
         if not (allow_uncited_framing and _is_framing_sentence(text)):
             raise SentenceRejected(RejectionReason.NO_CITATION, sentence)
         _check_safety_denylists(text, sentence)
